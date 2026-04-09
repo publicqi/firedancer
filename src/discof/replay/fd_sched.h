@@ -72,7 +72,8 @@ struct fd_sched_fec {
                                            bounds and unique across equivocated blocks. */
   ulong            slot;                /* Slot number of the block. */
   ulong            parent_slot;         /* Slot number of the parent block. */
-  fd_store_fec_t * fec;                 /* FEC set data. */
+  fd_store_fec_t * fec;                 /* FEC set metadata. */
+  uchar          * data;                /* Resolved laddr of the FEC set data buffer. */
   uint             shred_cnt;           /* Number of shreds in the FEC set. */
   uint             is_last_in_batch:1;  /* Set if this is the last FEC set in the batch; relevant because the
                                            parser should ignore trailing bytes at the end of a batch. */
@@ -194,10 +195,11 @@ fd_sched_footprint( ulong depth,           /* in [FD_SCHED_MIN_DEPTH,FD_SCHED_MA
    parameter is invalid. */
 
 void *
-fd_sched_new( void * mem,
-              ulong  depth,
-              ulong  block_cnt_max,
-              ulong  exec_cnt );
+fd_sched_new( void *     mem,
+              fd_rng_t * rng,
+              ulong      depth,
+              ulong      block_cnt_max,
+              ulong      exec_cnt );
 
 fd_sched_t *
 fd_sched_join( void * mem );
@@ -360,6 +362,9 @@ fd_sched_get_poh( fd_sched_t * sched, ulong bank_idx );
 
 uint
 fd_sched_get_shred_cnt( fd_sched_t * sched, ulong bank_idx );
+
+void
+fd_sched_metrics_write( fd_sched_t * sched );
 
 /* Serialize the current state as a cstr to the returned buffer.  Caller
    may read from the buffer until the next invocation of any fd_sched

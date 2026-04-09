@@ -18,7 +18,6 @@ INGEST_MODE="rocksdb"
 DUMP_DIR=${DUMP_DIR:="./dump"}
 ONE_OFFS=""
 HUGE_TLBFS_MOUNT_PATH=${HUGE_TLBFS_MOUNT_PATH:="/mnt/.fd"}
-HAS_INCREMENTAL="false"
 REDOWNLOAD=1
 SKIP_CHECKSUM=1
 DEBUG=( )
@@ -95,10 +94,6 @@ while [[ $# -gt 0 ]]; do
     --tile-cpus)
         TILE_CPUS="--tile-cpus $2"
         shift
-        shift
-        ;;
-    -v|--has-incremental)
-        HAS_INCREMENTAL="$2"
         shift
         ;;
     -nr|--no-redownload)
@@ -234,16 +229,12 @@ fi
 
 chmod -R 0700 $DUMP/$LEDGER
 
-if [[ -n "$GENESIS" ]]; then
-  HAS_INCREMENTAL="false"
-fi
 
 CONFIG_FILE="$DUMP_DIR/${LEDGER}_backtest.toml"
 cat <<EOF > ${CONFIG_FILE}
 [snapshots]
     max_full_snapshots_to_keep = 5
     max_incremental_snapshots_to_keep = 5
-    incremental_snapshots = $HAS_INCREMENTAL
     [snapshots.sources]
         servers = []
         [snapshots.sources.gossip]
@@ -270,6 +261,7 @@ cat <<EOF > ${CONFIG_FILE}
 [runtime]
     max_live_slots = $MAX_LIVE_SLOTS
     max_fork_width = 4
+    fixed_fec_sets = false
 [log]
     level_stderr = "$LOG_LEVEL_STDERR"
     path = "$LOG"
@@ -291,12 +283,11 @@ elif [[ "$DB" == "vinyl" ]]; then
   if [[ "$INDEX_MAX" -lt "1000000" ]]; then
     INDEX_MAX=1000000
   fi
-  INDEX_MAX=$(( INDEX_MAX * 2 ))
   cat <<EOF >> ${CONFIG_FILE}
 [accounts]
     in_memory_only = false
     max_accounts = $INDEX_MAX
-    file_size_gib = $((FUNK_PAGES * 4))
+    file_size_gib = $((FUNK_PAGES))
     max_unrooted_account_size_gib = 2
     cache_size_gib = 10
     io_provider = "io_uring"
@@ -345,13 +336,11 @@ if [ "$status" -eq 0 ]; then
   elapsed_time=$(grep "Backtest playback done." $LOG | grep -o "elapsed: [0-9.]*" | grep -o "[0-9.]*")
   echo "Replay time for $LEDGER: $elapsed_time seconds"
 
-  epoch_time_ns=$(grep "fd_process_new_epoch took" "$LOG" | grep -o "fd_process_new_epoch took [0-9]*" | grep -o "[0-9]*" | awk '{s+=$1} END {if(NR>0) printf "%.0f\n", s}')
-  epoch_count=$(grep -c "fd_process_new_epoch took" "$LOG")
-  if [ -n "$epoch_time_ns" ]; then
-    epoch_time_sec=$(printf "%.6f" "$(echo "$epoch_time_ns / 1000000000" | bc -l)")
-    epoch_avg_sec=$(printf "%.6f" "$(echo "$epoch_time_ns / $epoch_count / 1000000000" | bc -l)")
-    echo "Epoch boundary time for $LEDGER: ${epoch_time_sec} seconds (avg ${epoch_avg_sec} seconds over ${epoch_count} epochs)"
-  fi
+  while IFS= read -r epoch_line; do
+    epoch_num=$(echo "$epoch_line" | grep -o "starting epoch [0-9]*" | grep -o "[0-9]*")
+    epoch_time_sec=$(echo "$epoch_line" | grep -o "took [0-9.]*" | grep -o "[0-9.]*")
+    echo "Epoch $epoch_num boundary time for $LEDGER: ${epoch_time_sec} seconds"
+  done < <(grep "starting epoch .* took " "$LOG")
 
   echo_notice "Finished backtest for ledger $LEDGER\n"
   exit 0

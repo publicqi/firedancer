@@ -10,6 +10,7 @@
 #include "../../disco/fd_txn_p.h"
 #include "../../disco/bundle/fd_bundle_tile.h"
 #include "../../discof/restore/fd_snapct_tile.h"
+#include "../../discof/restore/utils/fd_ssmsg.h"
 #include "../../discof/tower/fd_tower_tile.h"
 #include "../../discof/replay/fd_replay_tile.h"
 #include "../../choreo/tower/fd_tower.h"
@@ -21,7 +22,7 @@
 #include "../../waltz/http/fd_http_server.h"
 
 /* frankendancer only */
-#define FD_GUI_MAX_PEER_CNT ( 40200UL)
+#define FD_GUI_MAX_PEER_CNT (108000UL)
 
 /* frankendancer only */
 #define FD_GUI_START_PROGRESS_TYPE_INITIALIZING                       ( 0)
@@ -100,7 +101,6 @@ struct fd_gui_validator_info {
 #define FD_GUI_TILE_TIMER_LEADER_DOWNSAMPLE_CNT      (50UL)  /* 500ms / 10ms */
 #define FD_GUI_SCHEDULER_COUNT_SNAP_CNT              (512UL)
 #define FD_GUI_SCHEDULER_COUNT_LEADER_DOWNSAMPLE_CNT (50UL)  /* 500ms / 10ms */
-#define FD_GUI_TILE_TIMER_TILE_CNT                   (256UL)
 
 #define FD_GUI_VOTE_STATE_NON_VOTING (0)
 #define FD_GUI_VOTE_STATE_VOTING     (1)
@@ -109,8 +109,9 @@ struct fd_gui_validator_info {
 #define FD_GUI_BOOT_PROGRESS_TYPE_JOINING_GOSSIP               (1)
 #define FD_GUI_BOOT_PROGRESS_TYPE_LOADING_FULL_SNAPSHOT        (2)
 #define FD_GUI_BOOT_PROGRESS_TYPE_LOADING_INCREMENTAL_SNAPSHOT (3)
-#define FD_GUI_BOOT_PROGRESS_TYPE_CATCHING_UP                  (4)
-#define FD_GUI_BOOT_PROGRESS_TYPE_RUNNING                      (5)
+#define FD_GUI_BOOT_PROGRESS_TYPE_WAITING_FOR_SUPERMAJORITY    (4)
+#define FD_GUI_BOOT_PROGRESS_TYPE_CATCHING_UP                  (5)
+#define FD_GUI_BOOT_PROGRESS_TYPE_RUNNING                      (6)
 
 #define FD_GUI_BOOT_PROGRESS_FULL_SNAPSHOT_IDX        (0UL)
 #define FD_GUI_BOOT_PROGRESS_INCREMENTAL_SNAPSHOT_IDX (1UL)
@@ -225,7 +226,7 @@ struct fd_gui_validator_info {
    Ideally, we have enough space to store an epoch's worth of events,
    but we are limited by realistic memory consumption.  Instead, we pick
    bound heuristically. */
-#define FD_GUI_SHREDS_HISTORY_SZ     (432000UL*2000UL*4UL / 6UL)
+#define FD_GUI_SHREDS_HISTORY_SZ     (432000UL*2000UL*4UL / 12UL)
 
 #define FD_GUI_SLOT_SHRED_REPAIR_REQUEST          (0UL)
 #define FD_GUI_SLOT_SHRED_SHRED_RECEIVED_TURBINE  (1UL)
@@ -304,9 +305,12 @@ struct fd_gui_leader_slot {
      downsampled to be at most FD_GUI_TILE_TIMER_LEADER_DOWNSAMPLE_CNT
      samples (e.g. if there was an unusually long leader slot) and
      inserted into historical storage with capacity FD_GUI_LEADER_CNT.
-     FD_GUI_TILE_TIMER_TILE_CNT is the maximum number of tiles supported. */
-  fd_gui_tile_timers_t tile_timers[ FD_GUI_TILE_TIMER_LEADER_DOWNSAMPLE_CNT ][ FD_GUI_TILE_TIMER_TILE_CNT ];
-  ulong                tile_timers_sample_cnt;
+
+     The tile_timers pointer references trailing storage allocated
+     in fd_gui_footprint, with gui->tile_cnt elements per sample.
+     Sized as tile_timers[ FD_GUI_TILE_TIMER_LEADER_DOWNSAMPLE_CNT ][ tile_cnt ]. */
+  fd_gui_tile_timers_t * tile_timers;
+  ulong                  tile_timers_sample_cnt;
 
   fd_gui_scheduler_counts_t scheduler_counts[ FD_GUI_SCHEDULER_COUNT_LEADER_DOWNSAMPLE_CNT ][ 1 ];
   ulong                     scheduler_counts_sample_cnt;
@@ -536,6 +540,8 @@ struct fd_gui {
   fd_http_server_t * http;
   fd_topo_t * topo;
 
+  ulong tile_cnt;
+
   long next_sample_400millis;
   long next_sample_100millis;
   long next_sample_50millis;
@@ -554,6 +560,10 @@ struct fd_gui {
     int          is_full_client;
     char const * version;
     char const * cluster;
+
+    char   wfs_bank_hash[ FD_BASE58_ENCODED_32_SZ ];
+    ushort expected_shred_version;
+    int    wfs_enabled;
 
     ulong vote_distance;
     int vote_state;
@@ -612,6 +622,12 @@ struct fd_gui {
           ulong insert_accounts_current;
         } loading_snapshot[ FD_GUI_BOOT_PROGRESS_SNAPSHOT_CNT ];
 
+        ulong wfs_total_stake;
+        ulong wfs_connected_stake;
+        ulong wfs_total_peers;
+        ulong wfs_connected_peers;
+        ulong wfs_attempt;
+
         long  catching_up_time_nanos;
         ulong catching_up_first_replay_slot;
       } boot_progress;
@@ -631,6 +647,7 @@ struct fd_gui {
     ulong resolv_tile_cnt;
     ulong bank_tile_cnt;
     ulong execle_tile_cnt;
+    ulong execrp_tile_cnt;
     ulong shred_tile_cnt;
 
     ulong slot_rooted;
@@ -674,10 +691,12 @@ struct fd_gui {
     fd_gui_tile_stats_t tile_stats_reference[ 1 ];
     fd_gui_tile_stats_t tile_stats_current[ 1 ];
 
-    ulong                tile_timers_snap_idx;
-    ulong                tile_timers_snap_idx_slot_start;
-    /* Temporary storage for samples. Will be downsampled into leader history on slot end. */
-    fd_gui_tile_timers_t tile_timers_snap[ FD_GUI_TILE_TIMER_SNAP_CNT ][ FD_GUI_TILE_TIMER_TILE_CNT ];
+    ulong                  tile_timers_snap_idx;
+    ulong                  tile_timers_snap_idx_slot_start;
+    /* Temporary storage for samples.  Will be downsampled into
+       leader history on slot end.  Sized as
+       tile_timers_snap[ FD_GUI_TILE_TIMER_SNAP_CNT ][ tile_cnt ] */
+    fd_gui_tile_timers_t * tile_timers_snap;
 
     ulong                     scheduler_counts_snap_idx;
     ulong                     scheduler_counts_snap_idx_slot_start;
@@ -720,7 +739,6 @@ struct fd_gui {
 
       ulong start_slot;
       ulong end_slot;
-      ulong excluded_stake;
       fd_epoch_leaders_t * lsched;
       uchar __attribute__((aligned(FD_EPOCH_LEADERS_ALIGN))) _lsched[ FD_EPOCH_LEADERS_FOOTPRINT(MAX_STAKED_LEADERS, MAX_SLOTS_PER_EPOCH) ];
       fd_vote_stake_weight_t stakes[ MAX_STAKED_LEADERS ];
@@ -761,9 +779,8 @@ struct fd_gui {
     ulong history_tail;          /* history_tail % FD_GUI_SHREDS_HISTORY_SZ is one past the last valid event in history */
     fd_gui_slot_history_shred_event_t history[ FD_GUI_SHREDS_HISTORY_SZ ];
 
-    /* scratch space for stable sorts */
+    /* scratch space for archiving staged events */
     fd_gui_slot_staged_shred_event_t _staged_scratch [ FD_GUI_SHREDS_STAGING_SZ ];
-    fd_gui_slot_staged_shred_event_t _staged_scratch2[ FD_GUI_SHREDS_STAGING_SZ ];
   } shreds; /* full client */
 };
 
@@ -775,7 +792,7 @@ FD_FN_CONST ulong
 fd_gui_align( void );
 
 FD_FN_CONST ulong
-fd_gui_footprint( void );
+fd_gui_footprint( ulong tile_cnt );
 
 void *
 fd_gui_new( void *                shmem,
@@ -789,6 +806,8 @@ fd_gui_new( void *                shmem,
             int                   snapshots_enabled,
             int                   is_voting,
             int                   schedule_strategy,
+            char const *          wfs_expected_bank_hash_cstr,
+            ushort                expected_shred_version,
             fd_topo_t *           topo,
             long                  now );
 
@@ -893,6 +912,10 @@ fd_gui_handle_snapshot_update( fd_gui_t *                 gui,
                                fd_snapct_update_t const * msg );
 
 void
+fd_gui_stage_snapshot_manifest( fd_gui_t *                       gui,
+                                 fd_snapshot_manifest_t const *    manifest );
+
+void
 fd_gui_handle_leader_schedule( fd_gui_t *                    gui,
                                fd_stake_weight_msg_t const * leader_schedule,
                                long                          now );
@@ -903,8 +926,8 @@ fd_gui_handle_epoch_info( fd_gui_t *                  gui,
                           long                        now );
 
 void
-fd_gui_handle_notarization_update( fd_gui_t *                        gui,
-                                   fd_tower_slot_confirmed_t const * notar );
+fd_gui_handle_votes_update( fd_gui_t *                        gui,
+                                   fd_tower_slot_confirmed_t const * votes );
 
 void
 fd_gui_handle_tower_update( fd_gui_t *                   gui,

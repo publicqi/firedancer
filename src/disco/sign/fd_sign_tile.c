@@ -256,8 +256,9 @@ after_frag_sensitive( void *              _ctx,
   sign_duration += fd_tickcount();
   fd_histf_sample( ctx->sign_duration, (ulong)sign_duration );
 
-  fd_stem_publish( stem, in_idx, sig, ctx->out[ in_idx ].out_chunk, 64UL, 0UL, tsorig, 0UL );
-  ctx->out[ in_idx ].out_chunk = fd_dcache_compact_next( ctx->out[ in_idx ].out_chunk, 64UL, ctx->out[ in_idx ].out_chunk0, ctx->out[ in_idx ].out_wmark );
+  ulong out_sz = fd_ulong_if( (sign_type==FD_KEYGUARD_SIGN_TYPE_ED25519) && needs_second_sign, 128UL, 64UL );
+  fd_stem_publish( stem, in_idx, sig, ctx->out[ in_idx ].out_chunk, out_sz, 0UL, tsorig, 0UL );
+  ctx->out[ in_idx ].out_chunk = fd_dcache_compact_next( ctx->out[ in_idx ].out_chunk, out_sz, ctx->out[ in_idx ].out_chunk0, ctx->out[ in_idx ].out_wmark );
 }
 
 static void
@@ -366,15 +367,10 @@ unprivileged_init_sensitive( fd_topo_t *      topo,
       FD_TEST( !strcmp( out_link->name, "sign_gossip" ) );
       FD_TEST( in_link->mtu==2048UL );
       FD_TEST( out_link->mtu==64UL );
-    } else if ( !strcmp( in_link->name, "repair_sign" )
-             || !strcmp( in_link->name, "ping_sign" ) ) {
+    } else if ( !strcmp( in_link->name, "repair_sign" ) ) {
       ctx->in[ i ].role = FD_KEYGUARD_ROLE_REPAIR;
-      if( !strcmp( in_link->name, "ping_sign" ) ) {
-        FD_TEST( !strcmp( out_link->name, "sign_ping" ) );
-      } else {
-        FD_TEST( !strcmp( out_link->name, "sign_repair" ) );
-      }
-      FD_TEST( in_link->mtu==96 ); // FD_REPAIR_MAX_PREIMAGE_SZ
+      FD_TEST( !strcmp( out_link->name, "sign_repair" ) );
+      FD_TEST( in_link->mtu==96UL ); // FD_REPAIR_MAX_PREIMAGE_SZ
       FD_TEST( out_link->mtu==64UL );
     } else if ( !strcmp(in_link->name, "txsend_sign" ) ) {
       ctx->in[ i ].role = FD_KEYGUARD_ROLE_TXSEND;

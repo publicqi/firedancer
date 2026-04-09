@@ -160,8 +160,9 @@ snapshot_load_topo( config_t * config ) {
        guarantee enough mcache credits.  The mtu needs to be adjusted
        so that the total dcache size matches what snapin requires.
        Round up the mtu (ulong) size using: (...+(depth-1))/depth. */
-    fd_topob_link( topo, "snapin_txn", "snapin_txn",   16UL,    (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
-    fd_topob_link( topo, "snapin_wm", "snapin_wm",     16UL,    FD_SNAPWM_PAIR_BATCH_SZ_MAX,    1UL );
+    fd_topo_link_t * snapin_txn = fd_topob_link( topo, "snapin_txn", "snapin_txn",   16UL,    (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
+    /**/                          fd_topob_link( topo, "snapin_wm", "snapin_wm",     16UL,    FD_SNAPWM_PAIR_BATCH_SZ_MAX,    1UL );
+    fd_pod_insertf_ulong( topo->props, sizeof(ulong), "obj.%lu.app_sz", snapin_txn->dcache_obj_id );
     /* snapwh and snapwr both use snapwm_wh's dcache.  snapwh sends
        control messages to snapwr, using snapwh_wr link, instructing
        which chunks in the dcache are ready to be consumed by snapwr. */
@@ -179,8 +180,8 @@ snapshot_load_topo( config_t * config ) {
     }
   } else {
     if( vinyl_enabled ) {
-      FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",    128UL,   sizeof(fd_lthash_value_t),     1UL );
-      /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL, FD_SNAPWM_DUP_META_BATCH_SZ,     1UL );
+      FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",    128UL,   sizeof(fd_ssctrl_hash_result_t),     1UL );
+      /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL, FD_SNAPWM_DUP_META_BATCH_SZ,     1UL+sizeof(fd_ssctrl_hash_result_t)/FD_SNAPWM_DUP_META_BATCH_SZ ); /* snapwm forwards 1 fd_ssctrl_hash_result_t message (hash and capitalization) per snapshot load */
       /**/                 fd_topob_link( topo, "snaplv_lh",  "snaplv_lh", 262144UL,       FD_SNAPLV_DUP_META_SZ, FD_SNAPLV_STEM_BURST ); /* FD_SNAPWM_DUP_META_BATCH_CNT_MAX times the depth of snapwm_lv */
       /**/                 fd_topob_link( topo, "snaplv_ct",  "snaplv_ct",    128UL,                         0UL,     1UL );
     } else {
@@ -219,7 +220,7 @@ snapshot_load_topo( config_t * config ) {
     fd_topob_tile_out( topo, "snapin", 0UL,              "snapin_wm", 0UL );
     fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_wm", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
     fd_topob_tile_out( topo, "snapin", 0UL,              "snapin_txn",0UL );
-    fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_txn",0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
+    fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_txn",0UL, FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
     fd_topob_tile_out( topo, "snapwm", 0UL,              "snapwm_wh", 0UL );
     fd_topob_tile_in ( topo, "snapwh", 0UL, "metric_in", "snapwm_wh", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
     fd_topob_tile_out( topo, "snapwh", 0UL,              "snapwh_wr", 0UL );
@@ -299,8 +300,6 @@ static void
 snapshot_load_topo1( config_t * config ) {
   snapshot_load_topo( config );
 }
-
-extern int * fd_log_private_shared_lock;
 
 static void
 snapshot_load_args( int *    pargc,
@@ -537,7 +536,7 @@ accounts_hist_print( accounts_hist_t const * hist ) {
     /* bin min, max, avg */
     ulong hist_bin_min      = fd_ulong_if( hist->bin_cnt[ i ] > 0, hist->bin_min[ i ], 0UL );
     ulong hist_bin_max      = hist->bin_max[ i ];
-    ulong hist_bin_avg      = fd_ulong_if( hist->bin_cnt[ i ] > 0, hist->bin_acc[ i ] / hist->bin_cnt[ i ], 0UL );
+    ulong hist_bin_avg      = hist->bin_cnt[ i ] > 0 ? hist->bin_acc[ i ] / hist->bin_cnt[ i ] : 0UL;
     /* log */
     char buf[256];
     char * p = fd_cstr_init( buf );
@@ -686,7 +685,6 @@ snapshot_load_cmd_fn( args_t *   args,
 
   run_firedancer_init( config, 1, 0 );
 
-  fd_log_private_shared_lock[ 1 ] = 0;
   fd_topo_join_workspaces( topo, FD_SHMEM_JOIN_MODE_READ_WRITE, FD_TOPO_CORE_DUMP_LEVEL_DISABLED );
   fd_topo_fill( topo );
 

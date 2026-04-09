@@ -10,14 +10,14 @@
 #include "../program/fd_precompiles.h"
 #include "../fd_system_ids.h"
 #include "../../accdb/fd_accdb_admin_v1.h"
+#include "../../progcache/fd_progcache_admin.h"
 #include "../../log_collector/fd_log_collector.h"
 #include <assert.h>
 
 void
 fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
                                 fd_exec_instr_ctx_t *                ctx,
-                                fd_exec_test_instr_context_t const * test_ctx,
-                                bool                                 is_syscall ) {
+                                fd_exec_test_instr_context_t const * test_ctx ) {
 
   memset( ctx, 0, sizeof(fd_exec_instr_ctx_t) );
 
@@ -28,8 +28,8 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
   /* Create temporary funk transaction and txn / slot / epoch contexts */
 
   fd_funk_txn_xid_t parent_xid; fd_funk_txn_xid_set_root( &parent_xid );
-  fd_accdb_attach_child        ( runner->accdb_admin,     &parent_xid, xid );
-  fd_progcache_txn_attach_child( runner->progcache_admin, &parent_xid, xid );
+  fd_accdb_attach_child    ( runner->accdb_admin,     &parent_xid, xid );
+  fd_progcache_attach_child( runner->progcache->join, &parent_xid, xid );
 
   fd_txn_in_t *  txn_in  = fd_spad_alloc( runner->spad, alignof(fd_txn_in_t), sizeof(fd_txn_in_t) );
   fd_txn_out_t * txn_out = fd_spad_alloc( runner->spad, alignof(fd_txn_out_t), sizeof(fd_txn_out_t) );
@@ -50,15 +50,13 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
 
   /* Restore features */
   FD_TEST( test_ctx->has_features );
-  fd_features_t * features = fd_bank_features_modify( runner->bank );
+  fd_features_t * features = &runner->bank->f.features;
   fd_exec_test_feature_set_t const * feature_set = &test_ctx->features;
-  if( !fd_solfuzz_pb_restore_features( features, feature_set ) ) {
-    FD_LOG_ERR(( "invariant violation: unsupported feature ID" ));
-  }
+  FD_TEST( fd_solfuzz_pb_restore_features( features, feature_set ) );
 
   /* Blockhash queue init */
   ulong blockhash_seed; FD_TEST( fd_rng_secure( &blockhash_seed, sizeof(ulong) ) );
-  fd_blockhashes_t * blockhashes = fd_blockhashes_init( fd_bank_block_hash_queue_modify( runner->bank ), blockhash_seed );
+  fd_blockhashes_t * blockhashes = fd_blockhashes_init( &runner->bank->f.block_hash_queue, blockhash_seed );
   fd_memset( fd_blockhash_deq_push_tail_nocopy( blockhashes->d.deque ), 0, sizeof(fd_hash_t) );
 
   /* Set up mock txn descriptor and payload
@@ -89,7 +87,6 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
   txn_out->accounts.cnt     = 0UL;
   runtime->accounts.executable_cnt   = 0UL;
 
-  txn_out->details.programs_to_reverify_cnt  = 0UL;
   txn_out->details.loaded_accounts_data_size = 0UL;
   txn_out->details.accounts_resize_delta     = 0L;
 
@@ -134,7 +131,7 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
                  (ulong)test_ctx->accounts_count, (ulong)MAX_TX_ACCOUNT_LOCKS ));
   }
 
-  /* Load accounts into database */
+  /* Load accounts from input */
 
   fd_account_meta_t * metas[MAX_TX_ACCOUNT_LOCKS] = {0};
   txn_out->accounts.cnt = test_ctx->accounts_count;
@@ -162,34 +159,25 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
     txn_out->accounts.keys[j] = *acc_key;
 
     if( !memcmp( acc_key, test_ctx->program_id, sizeof(fd_pubkey_t) ) ) {
-      has_program_id = 1;
-      info->program_id = (uchar)txn_out->accounts.cnt;
+      has_program_id   = 1;
+      info->program_id = (uchar)j;
     }
   }
 
-  /* If the program id is not in the set of accounts it must be added to the set of accounts. */
-  if( FD_UNLIKELY( !has_program_id ) ) {
-    fd_pubkey_t * program_key = &txn_out->accounts.keys[ txn_out->accounts.cnt ];
-    memcpy( program_key, test_ctx->program_id, sizeof(fd_pubkey_t) );
-
-    fd_account_meta_t * meta = fd_spad_alloc( runner->spad, alignof(fd_account_meta_t), sizeof(fd_account_meta_t) );
-    fd_account_meta_init( meta );
-
-    txn_out->accounts.account[test_ctx->accounts_count].meta = meta;
-
-    info->program_id = (uchar)txn_out->accounts.cnt;
-    txn_out->accounts.cnt++;
-  }
+  /* Ensure the program id is in the set of accounts */
+  FD_TEST( has_program_id );
 
   /* Load in executable accounts */
   for( ulong i = 0; i < txn_out->accounts.cnt; i++ ) {
 
-    fd_account_meta_t * meta = txn_out->accounts.account[i].meta;
-    if( !fd_executor_pubkey_is_bpf_loader( fd_type_pun( meta->owner ) ) ) {
+    fd_account_meta_t * meta  = txn_out->accounts.account[i].meta;
+    fd_pubkey_t const * owner = fd_type_pun_const( meta->owner );
+
+    if( !fd_executor_pubkey_is_bpf_loader( owner ) ) {
       continue;
     }
 
-    if( FD_UNLIKELY( !memcmp( meta->owner, fd_solana_bpf_loader_upgradeable_program_id.key, sizeof(fd_pubkey_t) ) ) ) {
+    if( FD_UNLIKELY( !memcmp( owner, fd_solana_bpf_loader_upgradeable_program_id.key, sizeof(fd_pubkey_t) ) ) ) {
       fd_bpf_upgradeable_loader_state_t program_loader_state[1];
       int err = fd_bpf_loader_program_get_state( meta, program_loader_state );
       if( FD_UNLIKELY( err!=FD_EXECUTOR_INSTR_SUCCESS ) ) {
@@ -220,7 +208,7 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
     } else if( FD_UNLIKELY( !memcmp( meta->owner, fd_solana_bpf_loader_program_id.key, sizeof(fd_pubkey_t) ) ||
                             !memcmp( meta->owner, fd_solana_bpf_loader_deprecated_program_id.key, sizeof(fd_pubkey_t) ) ) ) {
       meta = txn_out->accounts.account[i].meta;
-    } else if( !memcmp( meta->owner, fd_solana_bpf_loader_v4_program_id.key, sizeof(fd_pubkey_t) ) ) {
+    } else if( !memcmp( owner, fd_solana_bpf_loader_v4_program_id.key, sizeof(fd_pubkey_t) ) ) {
       int err;
       fd_loader_v4_state_t const * state = fd_loader_v4_get_state( fd_account_data( meta ), meta->dlen, &err );
       if( FD_UNLIKELY( err ) ) {
@@ -233,22 +221,11 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
       }
       meta = txn_out->accounts.account[i].meta;
     }
-
-    FD_SPAD_FRAME_BEGIN( runner->spad ) {
-      uchar * scratch = fd_spad_alloc( runner->spad, FD_FUNK_REC_ALIGN, meta->dlen );
-      fd_progcache_inject_rec( runner->progcache_admin,
-                                &txn_out->accounts.keys[i],
-                                meta,
-                                features,
-                                fd_bank_slot_get( runner->bank ),
-                                scratch,
-                                meta->dlen );
-    } FD_SPAD_FRAME_END;
   }
 
-  fd_funk_txn_xid_t exec_xid[1] = {{ .ul={ fd_bank_slot_get( runner->bank ), runner->bank->data->idx } }};
-  fd_accdb_attach_child        ( runner->accdb_admin,     xid, exec_xid );
-  fd_progcache_txn_attach_child( runner->progcache_admin, xid, exec_xid );
+  fd_funk_txn_xid_t exec_xid[1] = {{ .ul={ runner->bank->f.slot, runner->bank->idx } }};
+  fd_accdb_attach_child    ( runner->accdb_admin,     xid, exec_xid );
+  fd_progcache_attach_child( runner->progcache->join, xid, exec_xid );
 
   /* Load instruction accounts */
 
@@ -258,7 +235,7 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
   }
 
   /* Restore sysvar cache */
-  fd_sysvar_cache_t * sysvar_cache = fd_bank_sysvar_cache_modify( runner->bank );
+  fd_sysvar_cache_t * sysvar_cache = &runner->bank->f.sysvar_cache;
   ctx->sysvar_cache = sysvar_cache;
   for( ulong i=0UL; i<txn_out->accounts.cnt; i++ ) {
     fd_sysvar_cache_restore_from_ref( sysvar_cache, txn_out->accounts.account[i].ro );
@@ -269,29 +246,29 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
   fd_sol_sysvar_clock_t clock_[1];
   fd_sol_sysvar_clock_t * clock = fd_sysvar_cache_clock_read( ctx->sysvar_cache, clock_ );
   FD_TEST( clock );
-  fd_bank_slot_set( runner->bank, clock->slot );
+  runner->bank->f.slot = clock->slot;
 
   fd_epoch_schedule_t epoch_schedule_[1];
   fd_epoch_schedule_t * epoch_schedule = fd_sysvar_cache_epoch_schedule_read( ctx->sysvar_cache, epoch_schedule_ );
   FD_TEST( epoch_schedule );
-  fd_bank_epoch_schedule_set( runner->bank, *epoch_schedule );
+  runner->bank->f.epoch_schedule = *epoch_schedule;
 
   fd_rent_t rent_[1];
   fd_rent_t * rent = fd_sysvar_cache_rent_read( ctx->sysvar_cache, rent_ );
   FD_TEST( rent );
-  fd_bank_rent_set( runner->bank, *rent );
+  runner->bank->f.rent = *rent;
 
   fd_block_block_hash_entry_t const * deq = fd_sysvar_cache_recent_hashes_join_const( ctx->sysvar_cache );
   FD_TEST( deq );
   if( !deq_fd_block_block_hash_entry_t_empty( deq ) ) {
     fd_block_block_hash_entry_t const * last = deq_fd_block_block_hash_entry_t_peek_tail_const( deq );
     if( last ) {
-      fd_blockhashes_t * blockhashes = fd_bank_block_hash_queue_modify( runner->bank );
+      fd_blockhashes_t * blockhashes = &runner->bank->f.block_hash_queue;
       fd_blockhashes_pop_new( blockhashes );
       fd_blockhash_info_t * info = fd_blockhashes_push_new( blockhashes, &last->blockhash );
       info->fee_calculator = last->fee_calculator;
 
-      fd_bank_rbh_lamports_per_sig_set( runner->bank, last->fee_calculator.lamports_per_signature );
+      runner->bank->f.rbh_lamports_per_sig = last->fee_calculator.lamports_per_signature;
     }
   }
   fd_sysvar_cache_recent_hashes_leave_const( ctx->sysvar_cache, deq );
@@ -313,24 +290,7 @@ fd_solfuzz_pb_instr_ctx_create( fd_solfuzz_runner_t *                runner,
                                        test_ctx->instr_accounts[j].is_writable,
                                        test_ctx->instr_accounts[j].is_signer );
   }
-  info->acct_cnt = (ushort)test_ctx->instr_accounts_count;
-
-  /* The remaining checks enforce that the program is in the accounts list. */
-  bool found_program_id = false;
-  for( uint i = 0; i < test_ctx->accounts_count; i++ ) {
-    if( 0 == memcmp( test_ctx->accounts[i].address, test_ctx->program_id, sizeof(fd_pubkey_t) ) ) {
-      info->program_id = (uchar) i;
-      found_program_id = true;
-      break;
-    }
-  }
-
-  /* For non-syscalls (instruction execution), program_id must be in the input accounts.
-     For syscalls, we skip this check because the program_id was already added to
-     txn_out->accounts at lines 169-181 if it wasn't in the input. */
-  if( !is_syscall && !found_program_id ) {
-    FD_LOG_ERR(( "invariant violation: Unable to find program_id in accounts" ));
-  }
+  info->acct_cnt          = (ushort)test_ctx->instr_accounts_count;
 
   ctx->instr              = info;
   ctx->runtime->progcache = runner->progcache;
@@ -347,13 +307,13 @@ fd_solfuzz_pb_instr_ctx_destroy( fd_solfuzz_runner_t * runner,
                                  fd_exec_instr_ctx_t * ctx ) {
   if( !ctx ) return;
   fd_accdb_v1_clear( runner->accdb_admin );
-  fd_progcache_clear( runner->progcache_admin );
+  fd_progcache_clear( runner->progcache->join );
 
   /* In order to check for leaks in the workspace, we need to compact the
      allocators. Without doing this, empty superblocks may be retained
      by the fd_alloc instance, which mean we cannot check for leaks. */
   fd_alloc_compact( fd_accdb_admin_v1_funk( runner->accdb_admin )->alloc );
-  fd_alloc_compact( runner->progcache_admin->funk->alloc );
+  fd_alloc_compact( runner->progcache->join->alloc );
 }
 
 ulong
@@ -367,7 +327,7 @@ fd_solfuzz_pb_instr_run( fd_solfuzz_runner_t * runner,
 
   /* Convert the Protobuf inputs to a fd_exec context */
   fd_exec_instr_ctx_t ctx[1];
-  fd_solfuzz_pb_instr_ctx_create( runner, ctx, input, false );
+  fd_solfuzz_pb_instr_ctx_create( runner, ctx, input );
 
   fd_instr_info_t * instr = (fd_instr_info_t *) ctx->instr;
 

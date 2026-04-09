@@ -124,15 +124,13 @@ streamlined_hash( fd_snapla_tile_t * ctx,
   if( FD_UNLIKELY( data_len > FD_RUNTIME_ACC_SZ_MAX ) ) FD_LOG_ERR(( "Found unusually large account (data_sz=%lu), aborting", data_len ));
   if( FD_UNLIKELY( lamports==0UL ) ) return;
 
-  uchar executable_flag = executable & 0x1;
-
   fd_lthash_adder_push_solana_account( ctx->adder,
                                        &ctx->running_lthash,
                                        pubkey,
                                        frame+0x88UL,
                                        data_len,
                                        lamports,
-                                       executable_flag,
+                                       executable,
                                        owner );
 
   if( FD_LIKELY( ctx->full ) ) ctx->metrics.full.accounts_hashed++;
@@ -142,6 +140,7 @@ streamlined_hash( fd_snapla_tile_t * ctx,
 static int
 handle_data_frag( fd_snapla_tile_t *  ctx,
                   ulong               chunk,
+                  ulong               sig,
                   ulong               sz,
                   fd_stem_context_t * stem ) {
   if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_FINISHING ) ) {
@@ -153,7 +152,9 @@ handle_data_frag( fd_snapla_tile_t *  ctx,
        we receive fail & init control messages to restart processing. */
     return 0;
   } else if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING ) ) {
-    FD_LOG_ERR(( "invalid state for data frag %d", ctx->state ));
+    FD_LOG_ERR(( "received unexpected data frag %s (%lu) in state %s (%lu)",
+                 fd_ssctrl_msg_ctrl_str( sig ), sig,
+                 fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
   }
 
   FD_TEST( chunk>=ctx->in.chunk0 && chunk<=ctx->in.wmark && sz<=ctx->in.mtu );
@@ -166,6 +167,7 @@ handle_data_frag( fd_snapla_tile_t *  ctx,
     int res = fd_ssparse_advance( ctx->ssparse, data, sz-ctx->in.pos, result );
     switch( res ) {
       case FD_SSPARSE_ADVANCE_ERROR:
+        FD_LOG_WARNING(( "error while parsing snapshot stream" ));
         transition_malformed( ctx, stem );
         return 0;
       case FD_SSPARSE_ADVANCE_AGAIN:
@@ -180,6 +182,7 @@ handle_data_frag( fd_snapla_tile_t *  ctx,
           result->manifest.acc_vec_map,
           result->manifest.acc_vec_pool );
         if( FD_UNLIKELY( res==FD_SSMANIFEST_PARSER_ADVANCE_ERROR ) ) {
+          FD_LOG_WARNING(( "error while parsing snapshot manifest" ));
           transition_malformed( ctx, stem );
           return 0;
         }
@@ -259,6 +262,7 @@ handle_control_frag( fd_snapla_tile_t *  ctx,
       FD_TEST( ctx->state==FD_SNAPSHOT_STATE_IDLE );
       ctx->full          = sig==FD_SNAPSHOT_MSG_CTRL_INIT_FULL;
       ctx->state         = FD_SNAPSHOT_STATE_PROCESSING;
+      ctx->in.pos        = 0UL;
       ctx->accounts_seen = 0UL;
       ctx->hash_account  = 0;
       ctx->acc_data_sz   = 0UL;
@@ -312,7 +316,9 @@ handle_control_frag( fd_snapla_tile_t *  ctx,
     }
 
     default: {
-      FD_LOG_ERR(( "unexpected control sig %lu", sig ));
+      FD_LOG_ERR(( "unexpected control frag %s (%lu) in state %s (%lu)",
+                   fd_ssctrl_msg_ctrl_str( sig ), sig,
+                   fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
       break;
     }
   }
@@ -334,7 +340,7 @@ returnable_frag( fd_snapla_tile_t *  ctx,
                  fd_stem_context_t *  stem ) {
   FD_TEST( ctx->state!=FD_SNAPSHOT_STATE_SHUTDOWN );
 
-  if( FD_UNLIKELY( sig==FD_SNAPSHOT_MSG_DATA ) ) return handle_data_frag( ctx, chunk, sz, stem );
+  if( FD_UNLIKELY( sig==FD_SNAPSHOT_MSG_DATA ) ) return handle_data_frag( ctx, chunk, sig, sz, stem );
   else                                           handle_control_frag( ctx, stem, sig );
 
   return 0;
@@ -385,6 +391,8 @@ unprivileged_init( fd_topo_t *      topo,
   fd_snapla_tile_t * ctx = FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_snapla_tile_t),   sizeof(fd_snapla_tile_t)        );
   void * _ssparse         = FD_SCRATCH_ALLOC_APPEND( l, fd_ssparse_align(),           fd_ssparse_footprint( 1UL<<24UL ));
   void * _manifest_parser = FD_SCRATCH_ALLOC_APPEND( l, fd_ssmanifest_parser_align(), fd_ssmanifest_parser_footprint() );
+
+  FD_TEST( fd_topo_tile_name_cnt( topo, "snapla" )<=FD_SNAPSHOT_MAX_SNAPLA_TILES );
 
   if( FD_UNLIKELY( tile->in_cnt!=1UL ) )  FD_LOG_ERR(( "tile `" NAME "` has %lu ins, expected 1",  tile->in_cnt  ));
   if( FD_UNLIKELY( tile->out_cnt!=1UL ) ) FD_LOG_ERR(( "tile `" NAME "` has %lu outs, expected 1", tile->out_cnt  ));

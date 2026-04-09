@@ -808,8 +808,8 @@ state_dst( fd_ssmanifest_parser_t * parser ) {
     case STATE_BLOCKHASH_QUEUE_AGES_HASH_INDEX:                                                               return (uchar*)&manifest->blockhashes[ idx1 ].hash_index;
     case STATE_BLOCKHASH_QUEUE_AGES_TIMESTAMP:                                                                return (uchar*)&manifest->blockhashes[ idx1 ].timestamp;
     case STATE_BLOCKHASH_QUEUE_MAX_AGE:                                                                       return NULL;
-    case STATE_ANCESTORS_LENGTH:                                                                              return (uchar*)&manifest->ancestors_len;
-    case STATE_ANCESTORS_SLOT:                                                                                return (uchar*)&manifest->ancestors[ idx1 ];
+    case STATE_ANCESTORS_LENGTH:                                                                              return (uchar*)&parser->length1;
+    case STATE_ANCESTORS_SLOT:                                                                                return NULL;
     case STATE_ANCESTORS_VAL:                                                                                 return NULL;
     case STATE_HASH:                                                                                          return manifest->bank_hash;
     case STATE_PARENT_HASH:                                                                                   return manifest->parent_bank_hash;
@@ -826,7 +826,7 @@ state_dst( fd_ssmanifest_parser_t * parser ) {
     case STATE_HASHES_PER_TICK:                                                                               return (uchar*)&manifest->hashes_per_tick;
     case STATE_TICKS_PER_SLOT:                                                                                return (uchar*)&manifest->ticks_per_slot;
     case STATE_NS_PER_SLOT:                                                                                   return (uchar*)&manifest->ns_per_slot;
-    case STATE_GENSIS_CREATION_TIME:                                                                          return (uchar*)&manifest->creation_time_millis;
+    case STATE_GENSIS_CREATION_TIME:                                                                          return (uchar*)&manifest->creation_time_seconds;
     case STATE_SLOTS_PER_YEAR:                                                                                return (uchar*)&manifest->slots_per_year;
     case STATE_ACCOUNTS_DATA_LEN:                                                                             return NULL;
     case STATE_SLOT:                                                                                          return (uchar*)&manifest->slot;
@@ -966,7 +966,7 @@ state_dst( fd_ssmanifest_parser_t * parser ) {
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLOCK_REVENUE_COMMISSION_BPS:                         return NULL;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_PENDING_DELEGATOR_REWARDS:                            return NULL;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION:                         return &parser->option;
-    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED:                                return NULL;
+    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED:                                return parser->epoch_idx!=ULONG_MAX ? manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ idx2 ].identity_bls : NULL;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_VOTES_LENGTH:                                         return (uchar*)&parser->length4;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_VOTES:                                                return NULL;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_ROOT_SLOT_OPTION:                                     return &parser->option;
@@ -1088,7 +1088,7 @@ state_dst( fd_ssmanifest_parser_t * parser ) {
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLOCK_REVENUE_COMMISSION_BPS:        return NULL;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_PENDING_DELEGATOR_REWARDS:           return NULL;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION:        return &parser->option;
-    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED:               return NULL;
+    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED:               return parser->epoch_idx!=ULONG_MAX ? manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ idx2 ].identity_bls : NULL;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_VOTES_LENGTH:                        return (uchar*)&parser->length4;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_VOTES:                               return NULL;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_ROOT_SLOT_OPTION:                    return &parser->option;
@@ -1358,41 +1358,6 @@ state_validate( fd_ssmanifest_parser_t * parser ) {
     default: break;
   }
 
-  switch( parser->state ) {
-    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_INFLATION_REWARDS_COMMISSION_BPS:
-    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_INFLATION_REWARDS_COMMISSION_BPS:
-      if( FD_UNLIKELY( parser->epoch_idx!=ULONG_MAX && manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].commission>10000 ) ) {
-        FD_LOG_WARNING(( "invalid commission %u", manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].commission ));
-        return -1;
-      }
-      break;
-    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V3_COMMISSION:
-    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V3_COMMISSION:
-      if( FD_UNLIKELY( parser->epoch_idx!=ULONG_MAX && (manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].commission & 0xFF) >100 ) ) {
-        FD_LOG_WARNING(( "invalid commission %u", manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].commission ));
-        return -1;
-      }
-      break;
-    case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_INFLATION_REWARDS_COMMISSION_BPS:
-      if( FD_UNLIKELY( manifest->vote_accounts[ parser->idx1 ].commission>10000 ) ) {
-        FD_LOG_WARNING(( "invalid commission %u", manifest->vote_accounts[ parser->idx1 ].commission ));
-        return -1;
-      }
-      break;
-    case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V3_COMMISSION:
-    // TODO: mainnet-308392063-v2.3.0_backtest.toml has a commission of 254 in it
-    // case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V11411_COMMISSION:
-    case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V0235_COMMISSION:
-      if( FD_UNLIKELY( (manifest->vote_accounts[ parser->idx1 ].commission & 0xFF) >100 ) ) {
-        FD_LOG_WARNING(( "invalid commission %u", manifest->vote_accounts[ parser->idx1 ].commission ));
-        return -1;
-      }
-      break;
-    default:
-      break;
-  }
-
-
   /* Lengths must be valid */
   switch( parser->state ) {
     case STATE_BLOCKHASH_QUEUE_AGES_LENGTH: {
@@ -1403,8 +1368,13 @@ state_validate( fd_ssmanifest_parser_t * parser ) {
       break;
     }
     case STATE_ANCESTORS_LENGTH: {
-      if( FD_UNLIKELY( !manifest->ancestors_len || manifest->ancestors_len>sizeof(manifest->ancestors)/sizeof(manifest->ancestors[0]) ) ) {
-        FD_LOG_WARNING(( "invalid ancestors length %lu", manifest->ancestors_len ));
+      /* Agave's bank now creates an ancestor set with a single entry
+         (the current slot), and the ancestors list is deprecated.
+         However, length must still be checked to keep it backward
+         compatible:
+         https://github.com/anza-xyz/agave/blob/v4.0.0-beta.1/runtime/src/bank.rs#L1846 */
+      if( FD_UNLIKELY( parser->length1>8192UL ) ) {
+        FD_LOG_WARNING(( "invalid ancestors length %lu", parser->length1 ));
         return -1;
       }
       break;
@@ -1443,6 +1413,15 @@ state_validate( fd_ssmanifest_parser_t * parser ) {
     case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V0235_EPOCH_CREDITS_LENGTH: {
       if( FD_UNLIKELY( manifest->vote_accounts[ parser->idx1 ].epoch_credits_history_len>64UL ) ) {
         FD_LOG_WARNING(( "invalid vote_accounts value data current epoch credits length %lu", manifest->vote_accounts[ parser->idx1 ].epoch_credits_history_len ));
+        return -1;
+      }
+      break;
+    }
+    case STATE_EPOCH_STAKES_LENGTH: {
+      if( FD_UNLIKELY( parser->epoch_stakes_len ) ) {
+        /* The epoch stakes in the bank is a deprecated, unused field.
+           https://github.com/anza-xyz/agave/blob/v3.1.9/runtime/src/serde_snapshot.rs#L461 */
+        FD_LOG_WARNING(( "invalid bank epoch stakes length %lu, expected to be 0 because the bank epoch stakes field is deprecated", parser->epoch_stakes_len ));
         return -1;
       }
       break;
@@ -1584,8 +1563,8 @@ state_validate( fd_ssmanifest_parser_t * parser ) {
 
 static inline int
 state_process( fd_ssmanifest_parser_t * parser,
-               acc_vec_map_t *         acc_vec_map,
-               acc_vec_t *             acc_vec_pool ) {
+               acc_vec_map_t *          acc_vec_map,
+               acc_vec_t *              acc_vec_pool ) {
   fd_snapshot_manifest_t * manifest = parser->manifest;
 
   FD_TEST( parser->state!=STATE_DONE );
@@ -1617,34 +1596,19 @@ state_process( fd_ssmanifest_parser_t * parser,
       .first_normal_epoch          = manifest->epoch_schedule_params.first_normal_epoch,
       .first_normal_slot           = manifest->epoch_schedule_params.first_normal_slot,
     };
+
+    /* The epoch field in the snapshot manifest is now deprecated.  We
+       derive the epoch from the slot and epoch schedule instead.
+       https://github.com/anza-xyz/agave/blob/v4.0.0-beta.1/runtime/src/serde_snapshot.rs#L174 */
+    parser->epoch                    = fd_slot_to_epoch( &epoch_schedule, manifest->slot, NULL );
     parser->leader_schedule_epoch    = fd_slot_to_leader_schedule_epoch( &epoch_schedule, manifest->slot );
     ulong const epoch_stakes_ele_cnt = sizeof(parser->manifest->epoch_stakes)/sizeof(fd_snapshot_manifest_epoch_stakes_t);
 
-    if( FD_UNLIKELY( parser->leader_schedule_epoch-parser->manifest->epoch>=epoch_stakes_ele_cnt ) ) {
-      /* We only support storing the epoch stakes for the current epoch
-         and the leader schedule epoch, which is usually 1 epoch ahead
-         of the current epoch.  If this ever changes, we will hit this
-         error and need to support more epoch stakes entries. */
-      FD_LOG_WARNING(( "fd_ssmanifest_parser only supports up to %lu epoch_stakes entries, but leader schedule epoch is %lu epochs after manifest epoch",
-                       epoch_stakes_ele_cnt, parser->leader_schedule_epoch-parser->manifest->epoch ));
+    ulong const epoch_stakes_base = parser->epoch>0UL ? parser->epoch-1UL : 0UL;
+    if( FD_UNLIKELY( parser->leader_schedule_epoch-epoch_stakes_base>=epoch_stakes_ele_cnt ) ) {
+      FD_LOG_WARNING(( "fd_ssmanifest_parser only supports up to %lu epoch_stakes entries, but leader schedule epoch is %lu epochs after base epoch",
+                       epoch_stakes_ele_cnt, parser->leader_schedule_epoch-epoch_stakes_base ));
       return -1;
-    }
-  }
-
-  if( FD_UNLIKELY( parser->state==STATE_EPOCH ) ) {
-    parser->manifest->epoch = parser->epoch;
-  }
-
-  if( FD_UNLIKELY( parser->state==STATE_EPOCH_STAKES_KEY ) ) {
-    /* The epoch_stakes in the bank is a deprecated, unused field.
-       TODO: remove this field and associated logic when agave fully
-       removes it.
-       https://github.com/anza-xyz/agave/blob/v3.1.9/runtime/src/serde_snapshot.rs#L151 */
-    if( parser->epoch_stakes_epoch>=parser->epoch && parser->epoch_stakes_epoch<=parser->leader_schedule_epoch ) {
-      parser->epoch_idx = parser->epoch_stakes_epoch-parser->epoch;
-    }
-    else {
-      parser->epoch_idx = ULONG_MAX;
     }
   }
 
@@ -1659,8 +1623,9 @@ state_process( fd_ssmanifest_parser_t * parser,
       return -1;
     }
 
-    if( parser->epoch_stakes_epoch>=parser->epoch && parser->epoch_stakes_epoch<=parser->leader_schedule_epoch ) {
-      parser->epoch_idx = parser->epoch_stakes_epoch-parser->epoch;
+    ulong const epoch_stakes_base = parser->epoch>0UL ? parser->epoch-1UL : 0UL;
+    if( parser->epoch_stakes_epoch>=epoch_stakes_base && parser->epoch_stakes_epoch<=parser->leader_schedule_epoch ) {
+      parser->epoch_idx = parser->epoch_stakes_epoch-epoch_stakes_base;
       parser->manifest->epoch_stakes[ parser->epoch_idx ].epoch = parser->epoch_stakes_epoch;
     }
     else {
@@ -1819,13 +1784,13 @@ state_process( fd_ssmanifest_parser_t * parser,
     case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V11411_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V0235_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_LTHASH_OPTION:             manifest->has_accounts_lthash    = !!parser->option; parser->state += 2-!!parser->option; return 0;
-    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION: parser->state += 2-!!parser->option; return 0;
+    case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION: if( parser->epoch_idx!=ULONG_MAX ) manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].has_identity_bls = !!parser->option; parser->state += 2-!!parser->option; return 0;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V3_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V11411_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_VERSIONED_EPOCH_STAKES_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V0235_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
 
-    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION: parser->state += 2-!!parser->option; return 0;
+    case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_BLS_PUBKEY_COMPRESSED_OPTION: if( parser->epoch_idx!=ULONG_MAX ) manifest->epoch_stakes[ parser->epoch_idx ].vote_stakes[ parser->idx2 ].has_identity_bls = !!parser->option; parser->state += 2-!!parser->option; return 0;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V4_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V3_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
     case STATE_EPOCH_STAKES_VOTE_ACCOUNTS_VALUE_DATA_V11411_ROOT_SLOT_OPTION: parser->state += 2-!!parser->option; return 0;
@@ -1838,7 +1803,7 @@ state_process( fd_ssmanifest_parser_t * parser,
   int next_target = INT_MAX;
   switch( parser->state ) {
     case STATE_BLOCKHASH_QUEUE_AGES_LENGTH:                            length = manifest->blockhashes_len;   idx = &parser->idx1; next_target = STATE_BLOCKHASH_QUEUE_MAX_AGE;                                break;
-    case STATE_ANCESTORS_LENGTH:                                       length = manifest->ancestors_len;     idx = &parser->idx1; next_target = STATE_HASH;                                                   break;
+    case STATE_ANCESTORS_LENGTH:                                       length = parser->length1;             idx = &parser->idx1; next_target = STATE_HASH;                                                   break;
     case STATE_HARD_FORKS_LENGTH:                                      length = manifest->hard_forks_len;    idx = &parser->idx1; next_target = STATE_TRANSACTION_COUNT;                                      break;
     case STATE_STAKES_VOTE_ACCOUNTS_LENGTH:                            length = manifest->vote_accounts_len; idx = &parser->idx1; next_target = STATE_STAKES_STAKE_DELEGATIONS_LENGTH;                        break;
     case STATE_STAKES_STAKE_DELEGATIONS_LENGTH:                        length = manifest->stake_delegations_len;        idx = &parser->idx1; next_target = STATE_STAKES_UNUSED;                                          break;
@@ -1866,7 +1831,7 @@ state_process( fd_ssmanifest_parser_t * parser,
   int iter_target = INT_MAX;
   switch( parser->state ) {
     case STATE_BLOCKHASH_QUEUE_AGES_TIMESTAMP:                                   length = manifest->blockhashes_len;       idx = &parser->idx1; next_target = STATE_BLOCKHASH_QUEUE_MAX_AGE;                                iter_target = STATE_BLOCKHASH_QUEUE_AGES_LENGTH+1UL;                            break;
-    case STATE_ANCESTORS_VAL:                                                    length = manifest->ancestors_len;         idx = &parser->idx1; next_target = STATE_HASH;                                                   iter_target = STATE_ANCESTORS_LENGTH+1UL;                                       break;
+    case STATE_ANCESTORS_VAL:                                                    length = parser->length1;                 idx = &parser->idx1; next_target = STATE_HASH;                                                   iter_target = STATE_ANCESTORS_LENGTH+1UL;                                       break;
     case STATE_HARD_FORKS_VAL:                                                   length = manifest->hard_forks_len;        idx = &parser->idx1; next_target = STATE_TRANSACTION_COUNT;                                      iter_target = STATE_HARD_FORKS_LENGTH+1UL;                                      break;
     case STATE_STAKES_VOTE_ACCOUNTS_VALUE_RENT_EPOCH:                            length = manifest->vote_accounts_len;     idx = &parser->idx1; next_target = STATE_STAKES_STAKE_DELEGATIONS_LENGTH;                        iter_target = STATE_STAKES_VOTE_ACCOUNTS_LENGTH+1UL;                            break;
     case STATE_STAKES_STAKE_DELEGATIONS_WARMUP_COOLDOWN_RATE:                    length = manifest->stake_delegations_len; idx = &parser->idx1; next_target = STATE_STAKES_UNUSED;                                          iter_target = STATE_STAKES_STAKE_DELEGATIONS_LENGTH+1UL;                        break;
@@ -1939,6 +1904,10 @@ fd_ssmanifest_parser_init( fd_ssmanifest_parser_t * parser,
   parser->dst_cur  = 0UL;
   parser->manifest = manifest;
 
+  manifest->epoch_stakes[0].vote_stakes_len = 0UL;
+  manifest->epoch_stakes[1].vote_stakes_len = 0UL;
+  manifest->epoch_stakes[2].vote_stakes_len = 0UL;
+
   FD_SCRATCH_ALLOC_INIT( l, parser );
                          FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_ssmanifest_parser_t), sizeof(fd_ssmanifest_parser_t)                 );
 }
@@ -2003,7 +1972,3 @@ fd_ssmanifest_parser_consume( fd_ssmanifest_parser_t * parser,
   return FD_SSMANIFEST_PARSER_ADVANCE_DONE;
 }
 
-ulong
-fd_ssmanifest_parser_leader_schedule_epoch( fd_ssmanifest_parser_t * parser ) {
-  return parser->leader_schedule_epoch;
-}

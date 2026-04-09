@@ -172,6 +172,13 @@ void
 fd_fec_resolver_set_shred_version( fd_fec_resolver_t * resolver,
                                    ushort              expected_shred_version );
 
+/* fd_fec_resolver_set_discard_unexpected_data_complete_shreds updates
+   the activation slot used by the FEC resolver for the
+   discard_unexpected_data_complete_shreds feature. */
+void
+fd_fec_resolver_set_discard_unexpected_data_complete_shreds( fd_fec_resolver_t * resolver,
+                                                             ulong               activation_slot );
+
 /* fd_fec_resolver_advance_slot_old advances slot_old, discarding any
    in progress FEC sets with a slot strictly less than slot_old.
    Additionally, causes the FEC resolver to ignore any future shreds
@@ -212,13 +219,13 @@ typedef struct fd_fec_resolver_spilled fd_fec_resolver_spilled_t;
    pointer to the first byte of the public identity key of the validator
    that was leader during slot shred->slot.
 
-   On success ie. SHRED_{OKAY,COMPLETES}, a pointer to the fd_fec_set_t
+   On success ie. SHRED_{OKAY,COMPLETES}, a pointer to a copy of shred
+   will be written to the location pointed to by out_shred.
+   Additionally, on SHRED_COMPLETES a pointer to the fd_fec_set_t
    structure representing the FEC set of which the shred is a part will
-   be written to out_fec_set.  Additionally, on success a pointer to a
-   copy of shred will be written to the location pointed to by
-   out_shred.  See the long explanation above about the lifetimes of
-   these pointers.  Finally, on success the merkle root of the shred
-   (reconstructed from the merkle proof) will be written to
+   be written to out_fec_set.  See the long explanation above about the
+   lifetimes of these pointers.  Finally, on success the merkle root of
+   the shred (reconstructed from the merkle proof) will be written to
    out_merkle_root.  Unlike out_{fec_set,shred}, caller owns and
    provides the memory for out_merkle_root.  If the out_merkle_root
    pointer is NULL, the argument will be ignored and merkle root will
@@ -243,7 +250,8 @@ typedef struct fd_fec_resolver_spilled fd_fec_resolver_spilled_t;
 
    However, if the shred is part of an in progress FEC set but has
    already been received, FEC resolver returns SHRED_DUPLICATE and
-   populates out_merkle_root if it is non-NULL.
+   populates out_merkle_root if it is non-NULL. out_shred will be
+   populated similarly to when returning SHRED_OKAY.
 
    If the shred fails validation for any other reason, returns
    SHRED_REJECTED and does not write to out_{fec_set,shred,merkle_root}.

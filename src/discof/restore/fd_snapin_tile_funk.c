@@ -30,6 +30,7 @@ fd_snapin_process_account_header_funk( fd_snapin_tile_t *            ctx,
         return early_exit;
       }
       ctx->metrics.accounts_replaced++;
+      ctx->dup_capitalization = fd_ulong_sat_add( ctx->dup_capitalization, meta->lamports );
       fd_snapin_send_duplicate_account( ctx, meta->lamports, (uchar const *)meta + sizeof(fd_account_meta_t), meta->dlen, meta->executable, meta->owner, result->account_header.pubkey, 1, &early_exit);
     }
   }
@@ -48,7 +49,7 @@ fd_snapin_process_account_header_funk( fd_snapin_tile_t *            ctx,
   ulong const alloc_sz = sizeof(fd_account_meta_t)+result->account_header.data_len;
   ulong       alloc_max;
   meta = fd_alloc_malloc_at_least( funk->alloc, 16UL, alloc_sz, &alloc_max );
-  if( FD_UNLIKELY( !meta ) ) FD_LOG_ERR(( "Ran out of heap memory while loading snapshot (increase [funk.heap_size_gib])" ));
+  if( FD_UNLIKELY( !meta ) ) FD_LOG_ERR(( "Ran out of memory while loading snapshot (increase [accounts.file_size_gib])" ));
   memset( meta, 0, sizeof(fd_account_meta_t) );
   rec->val_gaddr = fd_wksp_gaddr_fast( funk->wksp, meta );
   rec->val_max   = (uint)( fd_ulong_min( alloc_max, FD_FUNK_REC_VAL_MAX ) & FD_FUNK_REC_VAL_MAX );
@@ -61,6 +62,8 @@ fd_snapin_process_account_header_funk( fd_snapin_tile_t *            ctx,
   meta->executable = (uchar)result->account_header.executable;
 
   ctx->acc_data = (uchar*)meta + sizeof(fd_account_meta_t);
+
+  ctx->capitalization = fd_ulong_sat_add( ctx->capitalization, result->account_header.lamports );
 
   if( FD_LIKELY( should_publish ) ) fd_funk_rec_publish( funk, prepare );
   return early_exit;
@@ -100,7 +103,7 @@ streamlined_insert( fd_snapin_tile_t * ctx,
   ulong const alloc_sz = sizeof(fd_account_meta_t)+data_len;
   ulong       alloc_max;
   fd_account_meta_t * meta = fd_alloc_malloc_at_least( funk->alloc, 16UL, alloc_sz, &alloc_max );
-  if( FD_UNLIKELY( !meta ) ) FD_LOG_ERR(( "Ran out of heap memory while loading snapshot (increase [funk.heap_size_gib])" ));
+  if( FD_UNLIKELY( !meta ) ) FD_LOG_ERR(( "Ran out of memory while loading snapshot (increase [accounts.file_size_gib])" ));
   memset( meta, 0, sizeof(fd_account_meta_t) );
   rec->val_gaddr = fd_wksp_gaddr_fast( funk->wksp, meta );
   rec->val_max   = (uint)( fd_ulong_min( alloc_max, FD_FUNK_REC_VAL_MAX ) & FD_FUNK_REC_VAL_MAX );
@@ -116,6 +119,9 @@ streamlined_insert( fd_snapin_tile_t * ctx,
   /* Write data */
   uchar * acc_data = (uchar *)( meta+1 );
   fd_memcpy( acc_data, frame+0x88UL, data_len );
+
+  /* update capitalization */
+  ctx->capitalization = fd_ulong_sat_add( ctx->capitalization, lamports );
 }
 
 /* process_account_batch is a happy path performance optimization
@@ -228,6 +234,7 @@ fd_snapin_process_account_batch_funk( fd_snapin_tile_t *            ctx,
       } else if( slot > existing->slot) {
         /* send the to-be-replaced account to the subtracting hash tile */
         ctx->metrics.accounts_replaced++;
+        ctx->dup_capitalization = fd_ulong_sat_add( ctx->dup_capitalization, existing->lamports );
         fd_snapin_send_duplicate_account( ctx, existing->lamports, (uchar const *)existing + sizeof(fd_account_meta_t), existing->dlen, existing->executable, existing->owner, pubkey, 1, &early_exit );
       } else { /* slot==existing->slot */
         FD_TEST( 0 );
@@ -294,7 +301,7 @@ fd_snapin_read_account_funk( fd_snapin_tile_t *  ctx,
                   acct_addr_b58, data_sz, data_max ));
   }
 
-  memcpy( meta->owner, fd_accdb_ref_owner( ro ), sizeof(fd_pubkey_t) );
+  fd_memcpy( meta->owner, fd_accdb_ref_owner( ro )->hash, sizeof(fd_pubkey_t) );
   meta->lamports   = fd_accdb_ref_lamports( ro );
   meta->slot       = fd_accdb_ref_slot( ro );
   meta->dlen       = (uint)data_sz;

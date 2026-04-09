@@ -13,7 +13,7 @@
 #include "../../flamenco/runtime/sysvar/fd_sysvar_rent.h"
 #include "../../flamenco/runtime/fd_runtime_const.h"
 #include "../../flamenco/gossip/fd_gossip_message.h"
-#include "../../flamenco/runtime/fd_genesis_parse.h"
+#include "../../flamenco/genesis/fd_genesis_parse.h"
 #include "../../util/net/fd_ip4.h"
 #include "../../waltz/http/fd_http_server.h"
 #include "../../waltz/http/fd_http_server_private.h"
@@ -248,7 +248,7 @@ struct fd_rpc_tile {
 
   long next_poll_deadline;
 
-  char version_string[ 16UL ];
+  char version_string[ 64UL ];
 
   fd_keyswitch_t * keyswitch;
   uchar identity_pubkey[ 32UL ];
@@ -494,10 +494,10 @@ returnable_frag( fd_rpc_tile_t *     ctx,
       }
       case FD_GOSSIP_UPDATE_TAG_CONTACT_INFO_REMOVE: {
         if( FD_UNLIKELY( update->contact_info_remove->idx>=FD_CONTACT_INFO_TABLE_SIZE ) ) FD_LOG_ERR(( "unexpected remove_contact_info_idx %lu >= %lu", update->contact_info_remove->idx, FD_CONTACT_INFO_TABLE_SIZE ));
-        fd_rpc_cluster_node_t * node = &ctx->cluster_nodes[ update->contact_info->idx ];
+        fd_rpc_cluster_node_t * node = &ctx->cluster_nodes[ update->contact_info_remove->idx ];
         FD_TEST( node->valid );
         node->valid = 0;
-        fd_rpc_cluster_node_dlist_idx_remove( ctx->cluster_nodes_dlist, update->contact_info->idx, ctx->cluster_nodes );
+        fd_rpc_cluster_node_dlist_idx_remove( ctx->cluster_nodes_dlist, update->contact_info_remove->idx, ctx->cluster_nodes );
         break;
       }
       default: break;
@@ -728,7 +728,7 @@ fd_rpc_validate_config( fd_rpc_tile_t *             ctx,
   }
   if( FD_UNLIKELY( _bank_idx==ULONG_MAX ) ) {
     CSTR_JSON( id, id_cstr );
-    *res = PRINTF_JSON( ctx, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":32065,\"message\":\"Firedancer Error: banks uninitialized\"},\"id\":%s}\n", id_cstr );
+    *res = PRINTF_JSON( ctx, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32065,\"message\":\"Firedancer Error: banks uninitialized\"},\"id\":%s}\n", id_cstr );
     return 0;
   }
   *bank_idx = _bank_idx;
@@ -1053,7 +1053,7 @@ getAccountInfo( fd_rpc_tile_t * ctx,
   }
 # endif
 
-  FD_BASE58_ENCODE_32_BYTES( fd_accdb_ref_owner( ro ), owner_b58 );
+  FD_BASE58_ENCODE_32_BYTES( fd_accdb_ref_owner( ro )->hash, owner_b58 );
   CSTR_JSON( id, id_cstr );
   fd_http_server_printf( ctx->http,
       "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"context\":{\"apiVersion\":\"%s\",\"slot\":%lu},\"value\":{"
@@ -1080,6 +1080,7 @@ getAccountInfo( fd_rpc_tile_t * ctx,
 
   uchar * encoded = fd_http_server_append_start( ctx->http, encoded_sz );;
   if( FD_UNLIKELY( !encoded ) ) {
+    fd_http_server_unstage( ctx->http );
     fd_accdb_close_ro( ctx->accdb, ro );
     CSTR_JSON( id, id_cstr );
     return PRINTF_JSON( ctx, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32065,\"message\":\"Firedancer Error: large accounts unsupported\"},\"id\":%s}\n", id_cstr );

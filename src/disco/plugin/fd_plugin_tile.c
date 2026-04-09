@@ -59,16 +59,18 @@ during_frag( fd_plugin_ctx_t * ctx,
   ctx->sz = sz;
   if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_GOSSIP && sig==FD_PLUGIN_MSG_GOSSIP_UPDATE ) ) {
     ulong peer_cnt = ((ulong *)src)[ 0 ];
-    FD_TEST( peer_cnt<=40200 );
+    FD_TEST( peer_cnt<=108000UL );
     ctx->sz = 8UL + peer_cnt*FD_GOSSIP_LINK_MSG_SIZE;
   } else if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_GOSSIP || ctx->in_kind[ in_idx ]==IN_KIND_POHH || ctx->in_kind[ in_idx ]==IN_KIND_VOTE ) && FD_LIKELY( sig==FD_PLUGIN_MSG_VOTE_ACCOUNT_UPDATE ) ) {
     ulong peer_cnt = ((ulong *)src)[ 0 ];
-    FD_TEST( peer_cnt<=40200 );
+    FD_TEST( peer_cnt<=108000UL );
     ctx->sz = 8UL + peer_cnt*112UL;
   } else if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_STAKE ) ) {
     ulong staked_cnt = ((ulong *)src)[ 1 ];
-    FD_TEST( staked_cnt<=MAX_STAKED_LEADERS );
-    ctx->sz = fd_stake_weight_msg_sz( staked_cnt );
+    ulong id_cnt     = ((ulong *)src)[ 2 ];
+    FD_TEST( staked_cnt<=MAX_COMPRESSED_STAKE_WEIGHTS );
+    FD_TEST( id_cnt<=MAX_SHRED_DESTS );
+    ctx->sz = fd_stake_weight_msg_sz( staked_cnt, id_cnt );
   }
 
   if( FD_UNLIKELY( chunk<ctx->in[ in_idx ].chunk0 || chunk>ctx->in[ in_idx ].wmark || sz>ctx->in[ in_idx ].mtu ) )

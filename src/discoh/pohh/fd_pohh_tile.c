@@ -386,8 +386,16 @@ struct fd_pohh_tile {
   double slot_duration_ns;
   double hashcnt_duration_ns;
   ulong  hashcnt_per_slot;
-  /* Constant, fixed at initialization.  The maximum number of
-     microblocks that the pack tile can publish in each slot. */
+
+  /* The maximum number of real microblocks that the pack tile is
+     allowed to publish in each slot.
+
+     While we are leader, PoH internally treats this limit as having
+     one extra phantom "microblock" reserved for the done_packing
+     message, so that PoH does not finish the slot before pack
+     confirms it is done.  Pack itself is configured with the
+     un-inflated limit and never publishes more than this many real
+     microblocks per slot. */
   ulong max_microblocks_per_slot;
 
   /* Consensus-critical slot cost limits. */
@@ -445,11 +453,6 @@ struct fd_pohh_tile {
      with conflicting accounts execute in order, but this is easiest to
      implement for now. */
   uint expect_pack_idx;
-
-  /* If we have received the slot done message from pack yet.  We are
-     not allowed to fully finish hashing the block until this happens so
-     that we know which slot the slot_done message is arriving for. */
-  int slot_done;
 
   /* Pack and bank tiles need a reference to the bank object with a
      slightly different lifetime than current_leader_bank, particularly
@@ -914,34 +917,62 @@ fd_ext_poh_reached_leader_slot( ulong * out_leader_slot,
     return 1;
   }
 
+  fd_pubkey_t const * reset_leader = fd_multi_epoch_leaders_get_leader_for_slot( ctx->mleaders, ctx->reset_slot );
+  if( FD_UNLIKELY( reset_leader && fd_memeq( reset_leader, ctx->identity_key.uc, 32UL ) ) ) {
+    /* Surprisingly, in some rare cases where we're skipping ourselves,
+       the following can occur:
+         Reset onto n-1
+         Tick into slot n, become leader for slot n, skipping slot n-1
+         Prior leader start publishing slot n-1
+         max_active_descendant is set to n
+         Switch forks, abandon slot n, reset onto slot n
+       In this case, next_leader_slot is n+1 because we can't become
+       leader again for slot n.  We don't want to give ourselves any
+       grace time though;  we want to start n+1 as soon as the hashing
+       is ready. */
+    fd_ext_poh_write_unlock();
+    return 1;
+  }
+
   long now_ns = fd_log_wallclock();
   long expected_start_time_ns = ctx->reset_slot_start_ns + (long)((double)(ctx->next_leader_slot-ctx->reset_slot)*ctx->slot_duration_ns);
 
-  /* If a prior leader is still in the process of publishing their slot,
-     delay ours to let them finish ... unless they are so delayed that
-     we risk getting skipped by the leader following us.  1.2 seconds
-     is a reasonable default here, although any value between 0 and 1.6
-     seconds could be considered reasonable.  This is arbitrary and
-     chosen due to intuition. */
+  /* Now we're faced with the question of how much grace to give the
+     prior leader before trying to skip them.  If they are still in the
+     process of publishing their slot, delay ours to let them finish ...
+     unless they are so delayed that we risk getting skipped by the
+     leader following us.  1.2 seconds is a reasonable default here,
+     although any value between 0 and 1.6 seconds could be considered
+     reasonable.  If they haven't started their last block, but we're
+     reset on their second to last block, we'll give them an extra
+     400ms.  This is arbitrary and chosen due to intuition. */
 
-  if( FD_UNLIKELY( now_ns<expected_start_time_ns+(long)(3.0*ctx->slot_duration_ns) ) ) {
-    /* If the max_active_descendant is >= next_leader_slot, we waited
-       too long and a leader after us started publishing to try and skip
-       us.  Just start our leader slot immediately, we might win ... */
+  long start_time_with_grace_ns = expected_start_time_ns;
 
-    if( FD_LIKELY( ctx->max_active_descendant>=ctx->reset_slot && ctx->max_active_descendant<ctx->next_leader_slot ) ) {
-      /* If one of the leaders between the reset slot and our leader
-         slot is in the process of publishing (they have a descendant
-         bank that is in progress of being replayed), then keep waiting.
-         We probably wouldn't get a leader slot out before they
-         finished.
+  if( FD_UNLIKELY( ctx->max_active_descendant>=ctx->next_leader_slot ) ) {
+     /* If the max_active_descendant is >= next_leader_slot, we waited
+        too long and a leader after us started publishing to try and skip
+        us.  Just start our leader slot immediately, we might win ... */
+    start_time_with_grace_ns = now_ns;
+  } else if( FD_LIKELY( ctx->max_active_descendant>=ctx->reset_slot ) ) {
+    /* If one of the leaders between the reset slot and our leader
+       slot is in the process of publishing (they have a descendant
+       bank that is in progress of being replayed), then keep waiting.
+       We probably wouldn't get a leader slot out before they
+       finished. */
+    start_time_with_grace_ns += (long)(3.0*ctx->slot_duration_ns);
+  } else if( FD_LIKELY( ctx->next_leader_slot==ctx->reset_slot+1UL ) ) {
+    /* We finished replaying the slot two before ours, which means the
+       prior leader is probably online, but they haven't started
+       publishing the slot immediately prior to ours.  Give the prior
+       leader a little more time. */
+    start_time_with_grace_ns += (long)(1.0*ctx->slot_duration_ns);
+  }
 
-         Unless... we are past the deadline to start our slot by more
-         than 1.2 seconds, in which case we should probably start it to
-         avoid getting skipped by the leader behind us. */
-      fd_ext_poh_write_unlock();
-      return 0;
-    }
+
+  if( FD_UNLIKELY( now_ns<start_time_with_grace_ns ) ) {
+    fd_ext_poh_write_unlock();
+    return 0;
   }
 
   fd_ext_poh_write_unlock();
@@ -1094,14 +1125,6 @@ fd_ext_poh_begin_leader( void const * bank,
     ctx->hashcnt_per_slot = ctx->ticks_per_slot*hashcnt_per_tick;
     ctx->hashcnt_per_tick = hashcnt_per_tick;
 
-    if( FD_UNLIKELY( ctx->hashcnt_per_tick==1UL ) ) {
-      /* Low power producer, maximum of one microblock per tick in the slot */
-      ctx->max_microblocks_per_slot = ctx->ticks_per_slot;
-    } else {
-      /* See the long comment in after_credit for this limit */
-      ctx->max_microblocks_per_slot = fd_ulong_min( MAX_MICROBLOCKS_PER_SLOT, ctx->ticks_per_slot*(ctx->hashcnt_per_tick-1UL) );
-    }
-
     /* Discard any ticks we might have done in the interim.  They will
        have the wrong number of hashes per tick.  We can just catch back
        up quickly if not too many slots were skipped and hopefully
@@ -1125,8 +1148,15 @@ fd_ext_poh_begin_leader( void const * bank,
     ctx->hashcnt = 0UL;
   }
 
+  if( FD_UNLIKELY( ctx->hashcnt_per_tick==1UL ) ) {
+    /* Low power producer, maximum of one microblock per tick in the slot */
+    ctx->max_microblocks_per_slot = ctx->ticks_per_slot;
+  } else {
+    /* See the long comment in after_credit for this limit */
+    ctx->max_microblocks_per_slot = fd_ulong_min( MAX_MICROBLOCKS_PER_SLOT, ctx->ticks_per_slot*(ctx->hashcnt_per_tick-1UL) );
+  }
+
   ctx->current_leader_bank     = bank;
-  ctx->slot_done               = 0;
   ctx->microblocks_lower_bound = 0UL;
   ctx->cus_used                = 0UL;
 
@@ -1157,6 +1187,16 @@ fd_ext_poh_begin_leader( void const * bank,
   ctx->highwater_leader_slot = fd_ulong_max( fd_ulong_if( ctx->highwater_leader_slot==ULONG_MAX, 0UL, ctx->highwater_leader_slot ), slot );
 
   publish_became_leader( ctx, slot, epoch );
+
+  /* PoH ends the slot once it "ticks" through all of the hashes, but
+     we only want that to happen if we received a done packing message
+     from pack, so we always reserve an empty microblock at the end so
+     the tick advance will not end the slot without being told.
+
+     This should be after publish_became_leader so that pack receives
+     the original (un-inflated) max_microblocks_per_slot. */
+  ctx->max_microblocks_per_slot += 1UL;
+
   FD_LOG_INFO(( "fd_ext_poh_begin_leader(slot=%lu, highwater_leader_slot=%lu, last_slot=%lu, last_hashcnt=%lu)", slot, ctx->highwater_leader_slot, ctx->last_slot, ctx->last_hashcnt ));
 
   fd_ext_poh_write_unlock();
@@ -1303,14 +1343,14 @@ fd_ext_poh_reset( ulong         completed_bank_slot, /* The slot that successful
     ctx->hashcnt_duration_ns = (double)ctx->tick_duration_ns/(double)hashcnt_per_tick;
     ctx->hashcnt_per_slot = ctx->ticks_per_slot*hashcnt_per_tick;
     ctx->hashcnt_per_tick = hashcnt_per_tick;
+  }
 
-    if( FD_UNLIKELY( ctx->hashcnt_per_tick==1UL ) ) {
-      /* Low power producer, maximum of one microblock per tick in the slot */
-      ctx->max_microblocks_per_slot = ctx->ticks_per_slot;
-    } else {
-      /* See the long comment in after_credit for this limit */
-      ctx->max_microblocks_per_slot = fd_ulong_min( MAX_MICROBLOCKS_PER_SLOT, ctx->ticks_per_slot*(ctx->hashcnt_per_tick-1UL) );
-    }
+  if( FD_UNLIKELY( ctx->hashcnt_per_tick==1UL ) ) {
+    /* Low power producer, maximum of one microblock per tick in the slot */
+    ctx->max_microblocks_per_slot = ctx->ticks_per_slot;
+  } else {
+    /* See the long comment in after_credit for this limit */
+    ctx->max_microblocks_per_slot = fd_ulong_min( MAX_MICROBLOCKS_PER_SLOT, ctx->ticks_per_slot*(ctx->hashcnt_per_tick-1UL) );
   }
 
   /* When we reset, we need to allow PoH to tick freely again rather
@@ -1534,10 +1574,6 @@ after_credit( fd_pohh_tile_t *    ctx,
      pack tile for this slot. */
   ulong max_remaining_microblocks = ctx->max_microblocks_per_slot - ctx->microblocks_lower_bound;
 
-  /* We don't want to tick over (finish) the slot until pack tell us
-     it's done.  If we're waiting on pack, then we clamp to [0, 1] */
-  if( FD_LIKELY( !ctx->slot_done && is_leader ) ) max_remaining_microblocks = fd_ulong_min( 1UL, max_remaining_microblocks );
-
   /* With hashcnt_per_tick hashes per tick, we actually get
      hashcnt_per_tick-1 chances to mixin a microblock.  For each tick
      span that we need to reserve, we also need to reserve the hashcnt
@@ -1678,7 +1714,7 @@ after_credit( fd_pohh_tile_t *    ctx,
     long expected_slot_start_ns = ctx->reset_slot_start_ns + (long)((double)(ctx->slot-ctx->reset_slot)*ctx->slot_duration_ns);
     double actual_slot_duration_ns = ctx->slot_duration_ns<(double)(ctx->leader_bank_start_ns - expected_slot_start_ns) ? 0.0 : ctx->slot_duration_ns - (double)(ctx->leader_bank_start_ns - expected_slot_start_ns);
     double actual_hashcnt_duration_ns = actual_slot_duration_ns / (double)ctx->hashcnt_per_slot;
-    target_hashcnt = fd_ulong_if( actual_hashcnt_duration_ns==0.0, restricted_hashcnt, (ulong)((double)(now - ctx->leader_bank_start_ns) / actual_hashcnt_duration_ns) );
+    target_hashcnt = actual_hashcnt_duration_ns==0.0 ? restricted_hashcnt : (ulong)((double)(now - ctx->leader_bank_start_ns) / actual_hashcnt_duration_ns);
   }
   /* Clamp to [min_hashcnt, restricted_hashcnt] as above */
   target_hashcnt = fd_ulong_max( fd_ulong_min( target_hashcnt, restricted_hashcnt ), min_hashcnt );
@@ -1815,12 +1851,16 @@ before_frag( fd_pohh_tile_t * ctx,
 
   if( FD_LIKELY( ctx->in_kind[ in_idx ]!=IN_KIND_BANK && ctx->in_kind[ in_idx ]!=IN_KIND_PACK ) ) return 0;
 
-  if( FD_UNLIKELY( sig==ULONG_MAX ) ) {
-    /* Banks are drained, release pack's owenership of the current bank */
+  if( FD_UNLIKELY( sig==FD_PACK_MSG_DONE_DRAINING ) ) {
+    /* Banks are drained, release pack's ownership of the current bank */
     if( FD_UNLIKELY( ctx->pack_leader_bank ) ) fd_ext_bank_release( ctx->pack_leader_bank );
     ctx->pack_leader_bank = NULL;
     return 1; /* discard */
   }
+
+  /* Firedancer publishes dynamic microblock bound updates over the
+     pack_poh link.  Frankendancer does not use them. */
+  if( FD_UNLIKELY( sig==FD_PACK_MSG_REDUCE_MB_BOUND ) ) return 1; /* discard */
 
   uint pack_idx = (uint)fd_disco_execle_sig_pack_idx( sig );
   FD_TEST( ((int)(pack_idx-ctx->expect_pack_idx))>=0L );
@@ -1882,15 +1922,18 @@ during_frag( fd_pohh_tile_t * ctx,
        exact bound for once we receive them. */
     ctx->skip_frag = 1;
     if( FD_UNLIKELY( is_frag_for_prior_leader_slot ) ) return;
+    fd_done_packing_t const * done_packing = fd_chunk_to_laddr( ctx->in[ in_idx ].mem, chunk );
 
     FD_TEST( ctx->microblocks_lower_bound<=ctx->max_microblocks_per_slot );
-    fd_done_packing_t const * done_packing = fd_chunk_to_laddr( ctx->in[ in_idx ].mem, chunk );
+    FD_TEST( done_packing->microblocks_in_slot<=ctx->max_microblocks_per_slot-1UL );
     FD_LOG_INFO(( "done_packing(slot=%lu,seen_microblocks=%lu,microblocks_in_slot=%lu)",
                   ctx->slot,
                   ctx->microblocks_lower_bound,
                   done_packing->microblocks_in_slot ));
-    ctx->slot_done = 1;
-    ctx->microblocks_lower_bound += ctx->max_microblocks_per_slot - done_packing->microblocks_in_slot;
+
+    ctx->microblocks_lower_bound += 1UL /* done_packing as a phantom "microblock"*/
+                                  + (ctx->max_microblocks_per_slot-1UL) /* the canonical microblock limit */
+                                  - done_packing->microblocks_in_slot /* the actual microblock count */;
     return;
   } else {
     if( FD_UNLIKELY( chunk<ctx->in[ in_idx ].chunk0 || chunk>ctx->in[ in_idx ].wmark || sz>USHORT_MAX ) )
@@ -2286,7 +2329,6 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->lagged_consecutive_leader_start = tile->pohh.lagged_consecutive_leader_start;
   ctx->expect_sequential_leader_slot = ULONG_MAX;
 
-  ctx->slot_done               = 1;
   ctx->expect_pack_idx         = 0U;
   ctx->microblocks_lower_bound = 0UL;
 

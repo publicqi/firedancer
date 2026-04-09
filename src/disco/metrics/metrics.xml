@@ -440,6 +440,7 @@ metric introduced.
 
 <enum name="PackTxnInsertReturn">
     <!-- Note: You must keep the list of return values in fd_pack.h in sync with this list -->
+    <int value="-15" name="InstrAcctCnt" label="Transaction has an instruction that references too many accounts" />
     <int value="-14" name="NonceConflict" label="Bundle with two conflicting durable nonce transactions" />
     <int value="-13" name="BundleBlacklist" label="Transaction uses an account on the bundle blacklist" />
     <int value="-12" name="InvalidNonce" label="Transaction is an invalid durable nonce transaction" />
@@ -721,7 +722,7 @@ metric introduced.
 </enum>
 
 <tile name="shred">
-    <histogram name="ClusterContactInfoCnt" min="0" max="40200">
+    <histogram name="ClusterContactInfoCnt" min="0" max="108000">
         <summary>Number of contact infos in the cluster contact info message</summary>
     </histogram>
     <counter name="MicroblocksAbandoned" summary="The number of microblocks that were abandoned because we switched slots without finishing the current slot" />
@@ -787,7 +788,58 @@ metric introduced.
   <gauge name="ReasmLatestSlot" summary="Slot of the latest FEC set in the reassembly queue that can be replayed" />
   <gauge name="ReasmLatestFecIdx" summary="FEC set index of the latest FEC set in the reassembly queue that can be replayed" />
 
-  <counter name="SlotsTotal" summary="Count of slots replayed successfully" />
+  <gauge name="SchedActiveBankIdx" summary="The bank that the replay scheduler is currently dispatching work for" />
+  <gauge name="SchedLastDispatchBankIdx" summary="The bank that the replay scheduler last dispatched work for" />
+  <gauge name="SchedLastDispatchTimeNanos" converter="nanoseconds" summary="Timestamp when the replay scheduler last dispatched work" />
+  <gauge name="SchedStagingLanePopcnt" summary="The total number of staging lanes that are currently occupied in the replay scheduler. Up to four staging lanes can be occupied at once" />
+  <gauge name="SchedStagingLanePopcntWmk" summary="The high watermark number of staging lanes that were at one point occupied in the replay scheduler" />
+  <gauge name="SchedStagingLaneHeadBankIdx0" summary="The bank at the head of staging lane 0 of the replay dispatcher" />
+  <gauge name="SchedStagingLaneHeadBankIdx1" summary="The bank at the head of staging lane 1 of the replay dispatcher" />
+  <gauge name="SchedStagingLaneHeadBankIdx2" summary="The bank at the head of staging lane 2 of the replay dispatcher" />
+  <gauge name="SchedStagingLaneHeadBankIdx3" summary="The bank at the head of staging lane 3 of the replay dispatcher" />
+  <gauge name="SchedTxnPoolPopcnt" summary="The total number of transactions that are available to be scheduled in the replay scheduler" />
+  <gauge name="SchedTxnPoolSize" summary="The maximum number of transactions that the replay scheduler can consider. This value is fixed at Firedancer startup but is a useful reference for TxnPoolPopcnt" />
+  <gauge name="SchedMblkPoolPopcnt" summary="The total number of microblocks that are available to be scheduled in the replay scheduler" />
+  <gauge name="SchedMblkPoolSize" summary="The maximum number of microblocks that the replay scheduler can consider. This value is fixed at Firedancer startup but is a useful reference for MblkPoolPopcnt" />
+  <gauge name="SchedBlockPoolPopcnt" summary="The total number of blocks that are alive in the replay scheduler" />
+  <gauge name="SchedBlockPoolSize" summary="The maximum number of blocks that the replay scheduler can keep track of. This value is fixed at Firedancer startup but is a useful reference for BlockPoolPopcnt" />
+  <counter name="SchedBlockAddedStaged" summary="Blocks added to the replay scheduler as staged" />
+  <counter name="SchedBlockAddedUnstaged" summary="Blocks added to the replay scheduler as unstaged" />
+  <counter name="SchedBlockReplayed" summary="Blocks that the replay scheduler considers fully replayed" />
+  <counter name="SchedBlockAbandoned" summary="Blocks that the replay scheduler abandoned for any reason" />
+  <counter name="SchedBlockBad" summary="Blocks that the replay scheduler considers bad" />
+  <counter name="SchedBlockPromoted" summary="Blocks that the replay scheduler promoted from unstaged to a staging lane" />
+  <counter name="SchedBlockDemoted" summary="Blocks that the replay scheduler demoted from a staging lane to unstaged" />
+  <counter name="SchedDeactivateNoChild" summary="Number of times that the replay scheduler stopped dispatching because a block fully replayed and there was no child block available yet" />
+  <counter name="SchedDeactivateNoWork" summary="Number of times that the replay scheduler stopped dispatching because a partially replayed block ran out of work to dispatch" />
+  <counter name="SchedDeactivateAbandoned" summary="Number of times that the replay scheduler stopped dispatching because a block got abandoned for any reason" />
+  <counter name="SchedDeactivateMinority" summary="Number of times that the replay scheduler stopped dispatching because a block got abandoned for being on a minority fork" />
+  <counter name="SchedLaneSwitch" summary="Number of times that the replay scheduler switched the lane that it is dispatching from" />
+  <counter name="SchedLanePromote" summary="Number of times that the replay scheduler promoted one or more blocks onto a staging lane" />
+  <counter name="SchedLaneDemote" summary="Number of times that the replay scheduler demoted one or more blocks from a staging lane" />
+  <counter name="SchedForkObserved" summary="Number of forks that the replay scheduler has observed" />
+  <counter name="SchedAlutSuccess" summary="Number of transactions with address lookup tables that the replay scheduler successfully expanded" />
+  <counter name="SchedAlutFailure" summary="Number of transactions with address lookup tables that the replay scheduler failed to expand" />
+  <counter name="SchedTxnAbandonedParsed" summary="Number of transactions that were parsed but ended up being in abandoned blocks" />
+  <counter name="SchedTxnAbandonedExec" summary="Number of transactions that were executed but ended up being in abandoned blocks" />
+  <counter name="SchedTxnAbandonedDone" summary="Number of transactions that were fully replayed but ended up being in abandoned blocks" />
+  <counter name="SchedWeightedInFlight" summary="Cumulative number of transactions that have been in-flight from the replay scheduler's point of view, weighted by the duration of each transaction. This value is useful as the dividend for TxnWeightedInFlightDuration" />
+  <counter name="SchedWeightedInFlightDuration" summary="Duration over which TxnWeightedInFlight was accumulated. Use this as divisor to get the average number of in-flight transactions" />
+  <counter name="SchedNoneInFlightDuration" summary="Duration over which the replay scheduler had no transaction in-flight. This value is useful in a ratio against WeightedInFlightDuration to see how often the replay transaction execution pipeline was idle" />
+  <counter name="SchedTxnParsed" summary="Number of transactions that the replay pipeline has parsed" />
+  <counter name="SchedTxnExec" summary="Number of transactions that the replay pipeline has executed" />
+  <counter name="SchedTxnSigverify" summary="Number of transactions that the replay pipeline has sigverified" />
+  <counter name="SchedTxnMixin" summary="Number of transactions that the replay pipeline has performed PoH mixin" />
+  <counter name="SchedTxnDone" summary="Number of transactions that were fully replayed" />
+  <counter name="SchedMblkParsed" summary="Number of microblocks that the replay pipeline has parsed" />
+  <counter name="SchedMblkHashed" summary="Number of microblocks that the replay pipeline has fully hashed" />
+  <counter name="SchedMblkDone" summary="Number of microblocks that were fully replayed" />
+  <counter name="SchedBytesIngested" summary="Number of bytes that the replay scheduler has ingested" />
+  <counter name="SchedBytesIngestedPadding" summary="Number of bytes that the replay scheduler ingested but did not parse for being padding" />
+  <counter name="SchedBytesDropped" summary="Number of bytes that the replay scheduler refused to ingest because the block is considered abandoned" />
+  <counter name="SchedFec" summary="Number of FEC sets that the replay scheduler has been given" />
+
+  <counter name="SlotsTotal" summary="Count of slots replayed successfully or leader slots packed and shredded successfully" />
   <counter name="TransactionsTotal" summary="Count of transactions processed overall on the current fork" />
 
   <counter name="SchedFull" summary="Times where sched is full and a FEC set can't be processed" />
@@ -795,9 +847,6 @@ metric introduced.
   <counter name="LeaderBidWait" summary="Times where replay is blocked by the PoH tile not sending an end of leader message" />
   <counter name="BanksFull" summary="Times where banks are full and a FEC set can't be processed" />
   <counter name="StorageRootBehind" summary="Times where the storage root is behind the consensus root and can't be advanced" />
-
-  <counter name="ProgcacheRooted" summary="Number of program cache entries rooted" />
-  <counter name="ProgcacheGcRoot" summary="Number of program cache entries garbage collected while rooting" />
 
   <counter name="AccdbCreated" summary="Number of account database records created" />
   <counter name="AccdbReverted" summary="Number of account database records reverted" />
@@ -815,6 +864,25 @@ metric introduced.
   </histogram>
 
   <counter name="RootElapsedSeconds" enum="RootPhase" converter="seconds" summary="Total time in seconds spent rooting accounts" />
+
+  <!-- extensive program cache metrics.  Useful for development, will be
+       cut down with time -->
+  <counter name="ProgcacheRooted" summary="Number of program cache entries rooted" />
+  <counter name="ProgcacheGcRoot" summary="Number of program cache entries garbage collected while rooting" />
+  <gauge name="ProgcacheFreeParts" summary="Number of program cache heap partitions free (indicates fragmentation)" />
+  <gauge name="ProgcacheFreeBytes" summary="Program cache heap utilization (free bytes)" />
+  <gauge name="ProgcacheSizeBytes" summary="Program cache heap utilization (total size)" />
+  <gauge name="ProgcacheFreePartMaxBytes" summary="Largest free heap partition in program cache" />
+  <gauge name="ProgcacheUsedPartMedianBytes" summary="Median used heap partition size in program cache" />
+  <gauge name="ProgcacheUsedPartMeanBytes" summary="Mean used heap partition size in program cache" />
+  <counter name="ProgcacheTimeSeconds" converter="seconds" summary="Total time in seconds spent doing program cache tasks" />
+
+  <gauge name="AccdbCacheFreeParts" summary="Number of account database cache heap partitions free (indicates fragmentation)" />
+  <gauge name="AccdbCacheFreeBytes" summary="Account database cache heap utilization (free bytes)" />
+  <gauge name="AccdbCacheSizeBytes" summary="Account database cache heap utilization (total size)" />
+  <gauge name="AccdbCacheFreePartMaxBytes" summary="Largest free heap partition in account database cache" />
+  <gauge name="AccdbCacheUsedPartMedianBytes" summary="Median used heap partition size in account database cache" />
+  <gauge name="AccdbCacheUsedPartMeanBytes" summary="Mean used heap partition size in account database cache" />
 </tile>
 
 <enum name="RepairSentRequestTypes">
@@ -843,6 +911,8 @@ metric introduced.
     <counter name="EagerRepairAggresses" summary="How many times we pass eager repair threshold" />
     <counter name="RerequestQueue" summary="How many times we re-request a shred from the inflights queue" />
     <counter name="MalformedPing" summary="How many times we received a malformed ping" />
+    <counter name="UnknownPeerPing" summary="How many times we received a ping from an unknown peer" />
+    <counter name="FailedSigverifyPing" summary="How many times we failed to verify the signature of a ping" />
     <histogram name="SlotCompleteTime" min="0.200" max="2.0" converter="seconds">
       <summary>Time in seconds it took to complete a slot</summary>
     </histogram>
@@ -941,6 +1011,12 @@ metric introduced.
     <counter name="CrdsTxPushBytes" summary="Total wire bytes of CRDS sent out in push messages" enum="CrdsValue" />
     <counter name="CrdsTxPullResponseCount" summary="Number of CRDS values sent in pull response messages" enum="CrdsValue" />
     <counter name="CrdsTxPullResponseBytes" summary="Total wire bytes of CRDS sent out in pull response messages" enum="CrdsValue" />
+
+    <gauge name="WfsStakedPeersOnline" summary="Number of staked peers with recent gossip activity" />
+    <gauge name="WfsStakedPeersTotal" summary="Total number of staked peers being tracked" />
+    <gauge name="WfsStakeOnline" summary="Lamports of stake from peers with recent gossip activity" />
+    <gauge name="WfsStakeTotal" summary="Total lamports of stake being tracked" />
+    <gauge name="WfsState" summary="Wait for supermajority state. 1=INIT, 2=WAIT, 3=PUBLISH, 4=DONE" />
 </tile>
 
 <enum name="GossvfMessageOutcome">
@@ -1122,6 +1198,10 @@ metric introduced.
 </tile>
 
 <tile name="diag">
+    <gauge name="BundleHealth" summary="0=unhealthy, 1=healthy, 2=disabled. A healthy bundle subsystem means at least one bundle tile currently zhas an active connection to the block engine server" />
+    <gauge name="VoteHealth" summary="0=unhealthy, 1=healthy, 2=disabled. A healthy vote subsystem means the client has cast at least one vote in both the last 60 seconds and last 150 slots (before the currently replay slot)" />
+    <gauge name="ReplayHealth" summary="0=unhealthy, 1=healthy, 2=disabled. A healthy replay subsystem means that the largest fully-processed replay slot on the chosen consensus fork is within 12 slots of the current turbine slot" />
+    <gauge name="TurbineHealth" summary="0=unhealthy, 1=healthy, 2=disabled. A healthy turbine subsystem means that the largest slot associated with received turbine shreds has not stalled for 12 seconds, and also that the average replay ingress traffic exceeds the average ingress repair traffic over the past 12 seconds" />
 </tile>
 
 <tile name="genesi">
@@ -1164,13 +1244,6 @@ metric introduced.
 </enum>
 
 <tile name="execrp">
-    <counter name="ProgcacheMisses" summary="Number of program cache misses" />
-    <counter name="ProgcacheHits" summary="Number of program cache hits" />
-    <counter name="ProgcacheFills" summary="Number of program cache insertions" />
-    <counter name="ProgcacheFillTotSz" summary="Total number of bytes inserted into program cache" />
-    <counter name="ProgcacheFillFails" summary="Number of program cache load fails (tombstones inserted)" />
-    <counter name="ProgcacheDupInserts" summary="Number of time two tiles raced to insert the same cache entry" />
-    <counter name="ProgcacheInvalidations" summary="Number of program cache invalidations" />
     <counter name="AccdbCreated" summary="Number of account database records created" />
 
     <counter name="TxnRegime" converter="nanoseconds" enum="TxnRegime" summary="Mutually exclusive and exhaustive duration of time spent in transaction execution regimes" />
@@ -1178,6 +1251,22 @@ metric introduced.
 
     <counter name="TxnAccountChanges" enum="AccountChange" summary="Transaction account change event counters" />
     <counter name="ComputeUnitsTotal" summary="Estimated number of compute units executed since tile start" />
+
+  <!-- extensive program cache metrics.  Useful for development, will be
+       cut down with time -->
+  <counter name="ProgcacheLookups" summary="Program cache lookup counter" />
+  <counter name="ProgcacheHits" summary="Program cache hit counter" />
+  <counter name="ProgcacheMisses" summary="Program cache miss counter" />
+  <counter name="ProgcacheOomHeap" summary="Program cache out-of-memory event counter (heap)" />
+  <counter name="ProgcacheOomDesc" summary="Program cache out-of-memory event counter (descriptor table)" />
+  <counter name="ProgcacheFills" summary="Number of program cache insertions" />
+  <counter name="ProgcacheFillBytes" summary="Number of bytes inserted into program cache" />
+  <counter name="ProgcacheSpills" summary="Program cache spill counter (OOM fallback mechanism)" />
+  <counter name="ProgcacheSpillBytes" summary="Number of bytes spilled from program cache (OOM fallback mechanism)" />
+  <counter name="ProgcacheEvictions" summary="Program cache eviction counter" />
+  <counter name="ProgcacheEvictionBytes" summary="Number of bytes evicted from program cache" />
+  <counter name="ProgcacheDurationTotalSeconds" converter="seconds" summary="Total time in seconds spent on program cache operations" />
+  <counter name="ProgcacheDurationLoadSeconds" converter="seconds" summary="Total time in seconds spent loading programs" />
 </tile>
 
 <tile name="benchs" telemetry="false">
@@ -1188,20 +1277,68 @@ metric introduced.
 
     <!-- Replay slot completed -->
 
-    <counter name="SlotIgnoredCnt" summary="Number of replay_slot_completed frags we ignored" />
-    <gauge name="SlotIgnoredGauge" summary="Slot number of most recently ignored replay_slot_completed frag" />
-    <counter name="SlotEqvocedCnt" summary="Number of replay_slot_completed frags we detect as equivocations" />
-    <gauge name="SlotEqvocedGauge" summary="Slot number of most recently equivocating replay_slot_completed frag" />
+    <counter name="IgnoredCnt" summary="Number of replay_slot_completed frags we ignored" />
+    <gauge name="IgnoredSlot" summary="Most recent ignored replay_slot_completed frag" />
+    <counter name="EqvocCnt" summary="Number of replay_slot_completed frags we detect as equivocations" />
+    <gauge name="EqvocSlot" summary="Most recent equivocating replay_slot_completed frag" />
 
     <!-- Tower slot metadata -->
 
-    <gauge name="ReplaySlot" summary="Replay slot" />
-    <gauge name="VoteSlot" summary="Vote slot" />
-    <gauge name="ResetSlot" summary="Reset slot" />
-    <gauge name="RootSlot" summary="Root slot" />
-    <gauge name="InitSlot" summary="Init slot" />
+    <gauge name="ReplaySlot" summary="The most recently replayed slot, ULONG_MAX if nothing replayed yet. Not monotonically increasing." />
+    <gauge name="VoteSlot" summary="The highest voted slot in the local tower, ULONG_MAX if haven't voted. Monotonically increasing." />
+    <gauge name="ResetSlot" summary="The most recent reset slot, ULONG_MAX if no reset yet. Not monotonically increasing." />
+    <gauge name="RootSlot" summary="The highest rooted slot, ULONG_MAX if no root yet. Monotonically increasing." />
+    <gauge name="InitSlot" summary="Init slot. Either the snapshot or genesis slot. Set once and does not change." />
 
-    <!-- Tower voting decisions -->
+    <!-- Vote txn handling -->
+
+    <counter name="NotReady" summary="Frag was dropped because it arrived before tower tile was initialized" />
+
+    <counter name="TxnBadDeser" summary="Vote txn failed to deserialize" />
+    <counter name="TxnBadTower" summary="Vote txn deserialized but tower was invalid" />
+    <counter name="TxnNotTowerSync" summary="Vote txn was not a TowerSync instruction" />
+    <counter name="TxnEmptyTower" summary="Vote txn had an empty tower (validator hasn't voted)" />
+
+    <!-- Eqvoc -->
+
+    <counter name="EqvocSuccessMerkle" summary="Merkle root conflict" />
+    <counter name="EqvocSuccessMeta" summary="Coding metadata conflict" />
+    <counter name="EqvocSuccessLast" summary="Last shred index conflict" />
+    <counter name="EqvocSuccessOverlap" summary="Overlapping FEC set conflict" />
+    <counter name="EqvocSuccessChained" summary="Chained merkle root conflict" />
+
+    <counter name="EqvocErrSerde" summary="Invalid serialization" />
+    <counter name="EqvocErrSlot" summary="Shreds were for different slots" />
+    <counter name="EqvocErrVersion" summary="Either shred had wrong shred version" />
+    <counter name="EqvocErrType" summary="Wrong shred type (must be chained merkle)" />
+    <counter name="EqvocErrMerkle" summary="Failed to derive merkle root" />
+    <counter name="EqvocErrSignature" summary="Failed to sig verify" />
+
+    <counter name="EqvocErrChunkCnt" summary="num_chunks != FD_EQVOC_CHUNK_CNT" />
+    <counter name="EqvocErrChunkIdx" summary="chunk_index >= FD_EQVOC_CHUNK_CNT" />
+    <counter name="EqvocErrChunkLen" summary="chunk_len does not match expected length for chunk_index" />
+
+    <counter name="EqvocErrIgnoredFrom" summary="Unrecognized from address" />
+    <counter name="EqvocErrIgnoredSlot" summary="Slot older than root or unable to derive leader schedule" />
+
+    <counter name="EqvocProofConstructed" summary="Number of duplicate proofs we constructed from shreds" />
+    <counter name="EqvocProofVerified"    summary="Number of duplicate proofs we verified from gossip" />
+
+    <!-- Ghost -->
+
+    <counter name="GhostNotVoted" summary="Ghost vote skipped because voter hasn't voted" />
+    <counter name="GhostTooOld" summary="Ghost vote slot was behind the root" />
+    <counter name="GhostAlreadyVoted" summary="Ghost vote slot was not newer than previous vote" />
+
+    <!-- Hfork -->
+
+    <counter name="HforkUnknownVtr" summary="Hfork voter not in voter set" />
+    <counter name="HforkAlreadyVoted" summary="Hfork voter already voted for this block_id" />
+    <counter name="HforkTooOld" summary="Hfork vote slot not newer than previous" />
+    <gauge name="HforkMatchedSlot" summary="Highest slot where 52%+ of stake agreed on our bank hash" />
+    <gauge name="HforkMismatchedSlot" summary="Highest slot where 52%+ of stake agreed on a different bank hash than ours (we hard forked)" />
+
+    <!-- Tower -->
 
     <counter name="AncestorRollback" summary="Rollback to an ancestor of our prev vote (can't vote)" />
     <counter name="SiblingConfirmed" summary="Duplicate sibling got confirmed (can't vote)" />
@@ -1212,40 +1349,15 @@ metric introduced.
     <counter name="ThresholdFail" summary="Did not pass threshold check (can't vote)" />
     <counter name="PropagatedFail" summary="Prev leader block did not propagate (can't vote)" />
 
-    <!-- Vote txns from TPU / Gossip -->
+    <!-- Votes -->
 
-    <counter name="VoteTxnInvalid" summary="Number of invalid vote txns (malformed, bad signature, etc.)" />
-    <counter name="VoteTxnIgnored" summary="Number of ignored vote txns (unrecognized slot or block id)" />
+    <counter name="VotesTooOld" summary="Vote slot was behind the votes root" />
+    <counter name="VotesTooNew" summary="Vote slot was too far ahead of the votes root" />
+    <counter name="VotesUnknownVtr" summary="Vote account was not in the voter set" />
+    <counter name="VotesAlreadyVoted" summary="Voter already voted for this slot" />
+    <counter name="VotesUnknownSlot" summary="Vote txn was for a slot we haven't replayed" />
+    <counter name="VotesUnknownBlockId" summary="Vote txn was for a block id we don't recognize" />
 
-    <!-- DuplicateShreds from Gossip -->
-
-    <counter name="ProofErrChunkCnt" summary="Invalid DuplicateShred proof bad chunk cnt" />
-    <counter name="ProofErrChunkIdx" summary="Invalid DuplicateShred proof bad chunk idx" />
-    <counter name="ProofErrChunkLen" summary="Invalid DuplicateShred proof bad chunk len" />
-
-    <counter name="ProofErrShredSer" summary="Invalid DuplicateShred proof bad serialization" />
-    <counter name="ProofErrShredSlot" summary="Invalid DuplicateShred proof different slots" />
-    <counter name="ProofErrShredVersion" summary="Invalid DuplicateShred proof shred version mismatch" />
-    <counter name="ProofErrShredType" summary="Invalid DuplicateShred proof bad shred type" />
-    <counter name="ProofErrShredMerkle" summary="Invalid DuplicateShred proof bad merkle root" />
-    <counter name="ProofErrShredSignature" summary="Invalid DuplicateShred proof bad signature" />
-
-    <counter name="ProofVerifiedMerkle" summary="Merkle root conflict" />
-    <counter name="ProofVerifiedMeta" summary="Coding metadata conflict" />
-    <counter name="ProofVerifiedLast" summary="Last shred index conflict" />
-    <counter name="ProofVerifiedOverlap" summary="Overlapping FEC set conflict" />
-    <counter name="ProofVerifiedChained" summary="Chained merkle root conflict" />
-
-    <!-- DuplicateShreds we constructed from shreds -->
-
-    <counter name="ProofConstructed" summary="Number of duplicate proofs we constructed" />
-
-    <!-- Hard forks / bank hash cmp tracking -->
-
-    <counter name="HardForksSeen" summary="Number of hard forks we've seen (block ids with multiple candidate bank hashes)" />
-    <counter name="HardForksPruned" summary="Number of hard forks (candidate bank hashes) we've pruned" />
-    <gauge name="HardForksActive" summary="Currently active hard forks" />
-    <gauge name="HardForksMaxWidth" summary="Max number of candidate bank hashes for a given block id" />
 </tile>
 
 <tile name="gui">

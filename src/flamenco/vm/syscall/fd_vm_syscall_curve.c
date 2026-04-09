@@ -71,10 +71,8 @@ fd_vm_syscall_sol_curve_validate_point( /**/            void *  _vm,
 
   default:
     /* https://github.com/anza-xyz/agave/blob/5b3390b99a6e7665439c623062c1a1dda2803524/programs/bpf_loader/src/syscalls/mod.rs#L919-L928 */
-    if( FD_FEATURE_ACTIVE_BANK( vm->instr_ctx->bank, abort_on_invalid_curve ) ) {
-      FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
-      return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
-    }
+    FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
+    return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
   }
 
   *_ret = ret;
@@ -447,12 +445,8 @@ soft_error:
 
 invalid_error:
   /* https://github.com/anza-xyz/agave/blob/5b3390b99a6e7665439c623062c1a1dda2803524/programs/bpf_loader/src/syscalls/mod.rs#L1135-L1156 */
-  if( FD_FEATURE_ACTIVE_BANK( vm->instr_ctx->bank, abort_on_invalid_curve ) ) {
-    FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
-    return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
-  }
-  *_ret = 1UL;
-  return FD_VM_SUCCESS;
+  FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
+  return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
 }
 
 /* multi_scalar_mul_edwards computes a MSM on curve25519.
@@ -582,11 +576,8 @@ fd_vm_syscall_sol_curve_multiscalar_mul( void *  _vm,
 
   default:
     /* https://github.com/anza-xyz/agave/blob/5b3390b99a6e7665439c623062c1a1dda2803524/programs/bpf_loader/src/syscalls/mod.rs#L1262-L1271 */
-    if( FD_UNLIKELY( FD_FEATURE_ACTIVE_BANK( vm->instr_ctx->bank, abort_on_invalid_curve ) ) ) {
-      FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
-      return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
-    }
-    goto soft_error;
+    FD_VM_ERR_FOR_LOG_SYSCALL( vm, FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE );
+    return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
   }
 
   /* https://github.com/anza-xyz/agave/blob/v1.18.8/programs/bpf_loader/src/syscalls/mod.rs#L1155-L1164 */
@@ -647,7 +638,6 @@ fd_vm_syscall_sol_curve_multiscalar_mul( void *  _vm,
     return FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE; /* SyscallError::InvalidAttribute */
   }
 
-soft_error:
   *_ret = ret;
   return FD_VM_SUCCESS;
 }
@@ -675,7 +665,7 @@ fd_vm_syscall_sol_curve_decompress( /**/            void *  _vm,
   case FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G1_BE:
   case FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G1_LE: {
     FD_VM_CU_UPDATE( vm, FD_VM_CURVE_BLS12_381_G1_DECOMPRESS_COST );
-    point = FD_VM_MEM_HADDR_LD( vm, point_addr, FD_VM_ALIGN_RUST_POD_U8_ARRAY, FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G1_POINT_SZ );
+    point = FD_VM_MEM_HADDR_LD( vm, point_addr, FD_VM_ALIGN_RUST_POD_U8_ARRAY, FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G1_COMPRESSED_SZ );
     uchar _result[ FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G1_POINT_SZ ];
     if( FD_LIKELY( fd_bls12_381_g1_decompress_syscall( _result, point, big_endian )==0 ) ) {
       /* https://github.com/anza-xyz/agave/blob/v4.0.0-alpha.0/syscalls/src/lib.rs#L1160 */
@@ -689,7 +679,7 @@ fd_vm_syscall_sol_curve_decompress( /**/            void *  _vm,
   case FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_BE:
   case FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_LE: {
     FD_VM_CU_UPDATE( vm, FD_VM_CURVE_BLS12_381_G2_DECOMPRESS_COST );
-    point = FD_VM_MEM_HADDR_LD( vm, point_addr, FD_VM_ALIGN_RUST_POD_U8_ARRAY, FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_POINT_SZ );
+    point = FD_VM_MEM_HADDR_LD( vm, point_addr, FD_VM_ALIGN_RUST_POD_U8_ARRAY, FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_COMPRESSED_SZ );
     uchar _result[ FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_POINT_SZ ];
     if( FD_LIKELY( fd_bls12_381_g2_decompress_syscall( _result, point, big_endian )==0 ) ) {
       uchar * result = FD_VM_HADDR_QUERY_U8_ARRAY( vm, result_addr, FD_VM_SYSCALL_SOL_CURVE_BLS12_381_G2_POINT_SZ );

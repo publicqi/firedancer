@@ -438,7 +438,8 @@ run_monitor( config_t const * config,
 
       fd_topo_tile_t const * pack = &topo->tiles[ fd_topo_find_tile( topo, "pack", 0UL ) ];
       volatile ulong * pack_metrics = fd_metrics_tile( pack->metrics );
-      ulong pack_invalid = pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_WRITE_SYSVAR_OFF ] +
+      ulong pack_invalid = pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_INSTR_ACCT_CNT_OFF ] +
+                           pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_WRITE_SYSVAR_OFF ] +
                            pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_ESTIMATION_FAIL_OFF ] +
                            pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_TOO_LARGE_OFF ] +
                            pack_metrics[ FD_METRICS_COUNTER_PACK_TRANSACTION_INSERTED_EXPIRED_OFF ] +
@@ -544,7 +545,6 @@ monitor_cmd_fn( args_t *   args,
                     0U,
                     0,
                     0U,
-                    1,
                     !config->is_firedancer );
   }
 
@@ -572,8 +572,6 @@ monitor_cmd_fn( args_t *   args,
   struct sock_filter seccomp_filter[ 128UL ];
   uint drain_output_fd = args->monitor.drain_output_fd >= 0 ? (uint)args->monitor.drain_output_fd : (uint)-1;
   populate_sock_filter_policy_monitor( 128UL, seccomp_filter, (uint)fd_log_private_logfile_fd(), drain_output_fd );
-
-  if( FD_UNLIKELY( close( config->log.lock_fd ) ) ) FD_LOG_ERR(( "close() failed (%i-%s)", errno, fd_io_strerror( errno ) ));
 
   if( FD_LIKELY( config->development.sandbox ) ) {
     fd_sandbox_enter( config->uid,

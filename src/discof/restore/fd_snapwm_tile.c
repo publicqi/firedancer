@@ -108,15 +108,16 @@ verify_slot_deltas_with_slot_history( fd_snapwm_tile_t * ctx ) {
           slot_history,
           &decoded.o,
           data,
-          meta.dlen,
-          NULL )
+          meta.dlen )
   ) ) {
     FD_LOG_WARNING(( "SlotHistory sysvar account data is corrupt" ));
     return -1;
   }
 
   ulong txncache_entries_len = fd_ulong_load_8( ctx->txncache_entries_len_ptr );
-  if( FD_UNLIKELY( !txncache_entries_len ) ) FD_LOG_WARNING(( "txncache_entries_len %lu", txncache_entries_len ));
+  if( FD_UNLIKELY( !txncache_entries_len ) ) {
+    FD_LOG_WARNING(( "unexpected txncache entries length %lu. continue...", txncache_entries_len ));
+  }
 
   for( ulong i=0UL; i<txncache_entries_len; i++ ) {
     fd_sstxncache_entry_t const * entry = &ctx->txncache_entries[i];
@@ -135,6 +136,8 @@ handle_data_frag( fd_snapwm_tile_t *  ctx,
                   fd_stem_context_t * stem ) {
 
   if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_FINISHING ) ) {
+    FD_LOG_WARNING(( "received unexpected data frag while in state %s (%lu)",
+                     fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
     transition_malformed( ctx, stem );
     return 0;
   }
@@ -144,7 +147,8 @@ handle_data_frag( fd_snapwm_tile_t *  ctx,
     return 0;
   }
   if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING ) ) {
-    FD_LOG_ERR(( "invalid state for data frag %d", ctx->state ));
+    FD_LOG_ERR(( "received data frag during invalid state %s (%lu)",
+                 fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
   }
 
   FD_TEST( chunk>=ctx->in.chunk0 && chunk<=ctx->in.wmark && acc_cnt<=FD_SNAPWM_PAIR_BATCH_CNT_MAX );
@@ -221,7 +225,7 @@ handle_control_frag( fd_snapwm_tile_t *  ctx,
       ctx->state = FD_SNAPSHOT_STATE_FINISHING;
       fd_snapwm_vinyl_wd_fini( ctx );
       if( ctx->vinyl.txn_active ) {
-        fd_snapwm_vinyl_txn_commit( ctx, stem );
+        fd_snapwm_vinyl_txn_commit( ctx );
       }
       break;
     }
@@ -289,7 +293,9 @@ handle_control_frag( fd_snapwm_tile_t *  ctx,
     }
 
     default: {
-      FD_LOG_ERR(( "unexpected control sig %lu", sig ));
+      FD_LOG_ERR(( "unexpected control frag %s (%lu) in state %s (%lu)",
+                   fd_ssctrl_msg_ctrl_str( sig ), sig,
+                   fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
       break;
     }
   }
@@ -308,15 +314,20 @@ handle_control_frag( fd_snapwm_tile_t *  ctx,
 }
 
 static inline void
-handle_expected_hash_message( fd_snapwm_tile_t *  ctx,
-                              ulong               chunk,
-                              ulong               sz,
-                              fd_stem_context_t * stem ) {
-  if( FD_UNLIKELY( ctx->lthash_disabled ) ) return;
-  uchar * src = fd_chunk_to_laddr( ctx->in.wksp, chunk );
-  uchar * dst = fd_chunk_to_laddr( ctx->hash_out.mem, ctx->hash_out.chunk );
+handle_expected_hash_and_capitalization_message( fd_snapwm_tile_t *  ctx,
+                                                 ulong               chunk,
+                                                 ulong               sz,
+                                                 fd_stem_context_t * stem ) {
+  if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_ERROR ) ) return;
+  if( FD_UNLIKELY( sz!=sizeof(fd_ssctrl_hash_result_t) ) ) {
+    FD_LOG_ERR(( "unexpected msg sz %lu for sig FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL", sz ));
+    return;
+  }
+
+  fd_ssctrl_hash_result_t const * src = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
+  fd_ssctrl_hash_result_t * dst = fd_chunk_to_laddr( ctx->hash_out.mem, ctx->hash_out.chunk );
   memcpy( dst, src, sz );
-  fd_stem_publish( stem, ctx->out_ct_idx, FD_SNAPSHOT_HASH_MSG_EXPECTED, ctx->hash_out.chunk, sz, 0UL, 0UL, 0UL );
+  fd_stem_publish( stem, ctx->out_ct_idx, FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL, ctx->hash_out.chunk, sz, 0UL, 0UL, 0UL );
   ctx->hash_out.chunk = fd_dcache_compact_next( ctx->hash_out.chunk, sz, ctx->hash_out.chunk0, ctx->hash_out.wmark );
 }
 
@@ -333,12 +344,11 @@ returnable_frag( fd_snapwm_tile_t *  ctx,
                  fd_stem_context_t * stem ) {
   FD_TEST( ctx->state!=FD_SNAPSHOT_STATE_SHUTDOWN );
 
-  int ret = 0;
-  if( FD_LIKELY( sig==FD_SNAPSHOT_MSG_DATA ) )                 ret = handle_data_frag( ctx, chunk, sz/*acc_cnt*/, stem );
-  else if( FD_UNLIKELY( sig==FD_SNAPSHOT_HASH_MSG_EXPECTED ) ) handle_expected_hash_message( ctx, chunk, sz, stem );
-  else                                                         handle_control_frag( ctx, sig, stem );
+  if( FD_LIKELY( sig==FD_SNAPSHOT_MSG_DATA ) )                        return handle_data_frag( ctx, chunk, sz/*acc_cnt*/, stem );
+  else if( FD_UNLIKELY( sig==FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL ) ) handle_expected_hash_and_capitalization_message( ctx, chunk, sz, stem );
+  else                                                                handle_control_frag( ctx, sig, stem );
 
-  return ret;
+  return 0;
 }
 
 static ulong
@@ -346,7 +356,7 @@ populate_allowed_fds( fd_topo_t      const * topo FD_PARAM_UNUSED,
                       fd_topo_tile_t const * tile FD_PARAM_UNUSED,
                       ulong                  out_fds_cnt,
                       int *                  out_fds ) {
-  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "out_fds_cnt %lu", out_fds_cnt ));
+  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "invalid out_fds_cnt %lu", out_fds_cnt ));
 
   ulong out_cnt = 0;
   out_fds[ out_cnt++ ] = 2UL; /* stderr */
@@ -446,6 +456,18 @@ unprivileged_init( fd_topo_t *      topo,
   if( 0==strcmp( snapwm_out_link->name, "snapwm_lv" ) ) {
     ctx->hash_out = out1( topo, tile, "snapwm_lv" );
     FD_TEST( ctx->hash_out.mtu==FD_SNAPWM_DUP_META_BATCH_SZ );
+    /* The link mtu is FD_SNAPWM_DUP_META_BATCH_SZ, but snapwm also
+       forwards one fd_ssctrl_hash_result_t message per snapshot which
+       is larger than mtu.  Set wmark for the larger message so the
+       write does not exceed chunk1.  The link burst provides enough
+       extra dcache capacity for this. */
+    ulong wm_lv_mtu       = snapwm_out_link->mtu;
+    FD_TEST( wm_lv_mtu>0UL );
+    ulong wm_lv_burst     = snapwm_out_link->burst;
+    ulong wm_lv_burst_min = ( sizeof(fd_ssctrl_hash_result_t) + wm_lv_mtu - 1UL ) / wm_lv_mtu;
+    FD_TEST( wm_lv_burst>=wm_lv_burst_min );
+    void * dcache = snapwm_out_link->dcache;
+    ctx->hash_out.wmark = fd_dcache_compact_wmark( ctx->hash_out.mem, dcache, sizeof(fd_ssctrl_hash_result_t) );
   }
 
   for( ulong i=0UL; i<tile->in_cnt; i++ ) {
@@ -477,13 +499,11 @@ unprivileged_init( fd_topo_t *      topo,
   fd_snapwm_vinyl_unprivileged_init( ctx, topo, tile, _io_mm, _io_wd );
 }
 
-/* Control fragments can result in one extra publish to forward the
-   message down the pipeline, in addition to the result / malformed
-   message. It can send one duplicate account message as well.
-   When fd_snapwm_vinyl_txn_commit is invoked, the latter will handle
-   fseq checks internally, since the amount of messages it needs to
-   send far exceed the STEM_BURST. */
-#define STEM_BURST 3UL
+/* Only one message is expected to be sent out in any stem cycle, plus
+   (possibly) a subsequent error message.  Excluded from this analysis
+   is fd_snapwm_vinyl_txn_commit, which only executes when lthash
+   verification is disabled, therefore not affecting STEM_BURST. */
+#define STEM_BURST 2UL
 
 #define STEM_LAZY  1000L
 

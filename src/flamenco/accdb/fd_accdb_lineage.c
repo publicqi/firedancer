@@ -92,11 +92,6 @@ done:
     FD_LOG_CRIT(( "Account database fork depth exceeded max of %lu", lineage->max_depth ));
   }
 
-  /* FIXME crash if fork depth greater than cache depth */
-  if( lineage->fork_depth < lineage->max_depth ) {
-    fd_funk_txn_xid_set_root( &lineage->fork[ lineage->fork_depth++ ] );
-  }
-
   /* Remember head of fork */
   if( tip ) {
     lineage->tip_txn_idx = (ulong)( tip - funk->txn_pool->ele );
@@ -128,4 +123,16 @@ fd_accdb_lineage_write_check( fd_accdb_lineage_t const * lineage,
     FD_LOG_CRIT(( "Failed to modify account: XID %lu:%lu has children/is frozen", xid->ul[0], xid->ul[1] ));
   }
   return txn;
+}
+
+fd_xid_t const *
+fd_lineage_xid( fd_accdb_lineage_t const * lineage,
+                ulong                      slot ) {
+  ulong depth = lineage->fork_depth;
+  for( ulong i=0UL; i<depth; i++ ) {
+    if( lineage->fork[ i ].ul[0] == slot ) {
+      return &lineage->fork[ i ];
+    }
+  }
+  return NULL;
 }

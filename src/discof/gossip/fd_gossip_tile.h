@@ -16,7 +16,7 @@ typedef struct {
 } fd_gossip_in_ctx_t;
 
 #define FD_GOSSIP_WFS_STATE_INIT    (1)
-#define FD_GOSSIP_WFS_STATE_START   (2)
+#define FD_GOSSIP_WFS_STATE_WAIT    (2)
 #define FD_GOSSIP_WFS_STATE_PUBLISH (3)
 #define FD_GOSSIP_WFS_STATE_DONE    (4)
 
@@ -35,8 +35,6 @@ struct fd_gossip_tile_ctx {
   long   last_wallclock;
   long   last_tickcount;
 
-  fd_stake_weight_t * stake_weights_converted;
-
   fd_gossip_in_ctx_t in[ 128UL ];
 
   fd_gossip_out_ctx_t net_out[ 1 ];
@@ -54,24 +52,26 @@ struct fd_gossip_tile_ctx {
   fd_rng_t          rng[ 1 ];
 
 
+  /* FIXME: Support a larger bound. */
   /* The condition for complete = 1 is 80% of the cluster has joined
      gossip. "joining gossip" is based on contact info CRDS values
      with a wallclock timestamp in the last 15 seconds.
 
      We keep a copy of the snapshot bank's votes states in an array here
      for quick look up. */
-  fd_vote_stake_weight_t wfs_stakes_scratch[ FD_RUNTIME_MAX_VOTE_ACCOUNTS ];
-  fd_stake_weight_t      wfs_stakes        [ FD_RUNTIME_MAX_VOTE_ACCOUNTS ];
+  fd_vote_stake_weight_t wfs_stakes_scratch[ 40200UL ];
+  fd_stake_weight_t      wfs_stakes        [ 40200UL ];
   ulong                  wfs_stakes_cnt;
 
   /* wfs_active is used to keep track of nodes we've already labeled as
      being active on gossip, so we don't double count their stake. */
-  uchar             wfs_active[ FD_RUNTIME_MAX_VOTE_ACCOUNTS ];
+  uchar             wfs_active[ 40200UL ];
   int               wfs_state;
+
   struct {
     ulong online;
     ulong total;
-  } wfs_stake;
+  } wfs_stake, wfs_peers;
 
   /* Peer table saturation detection.  We track the high-water mark
      of the peer count (staked + unstaked).  When the count stops

@@ -36,7 +36,6 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
   ulong l = FD_LAYOUT_INIT;
   l = FD_LAYOUT_APPEND( l, alignof(fd_gossip_tile_ctx_t), sizeof(fd_gossip_tile_ctx_t)                                                  );
   l = FD_LAYOUT_APPEND( l, fd_gossip_align(),             fd_gossip_footprint( tile->gossip.max_entries, tile->gossip.entrypoints_cnt ) );
-  l = FD_LAYOUT_APPEND( l, alignof(fd_stake_weight_t),    MAX_STAKED_LEADERS*sizeof(fd_stake_weight_t)                                  );
   return FD_LAYOUT_FINI( l, scratch_align() );
 }
 
@@ -114,7 +113,7 @@ gossip_activity_update_fn( void *                           _ctx,
      This is okay since this callback is triggered by all contact info
      updates, including refreshes, so any updates we missed at boot will
      show up shortly after. */
-  if( FD_LIKELY( !ctx->my_contact_info->shred_version || ctx->wfs_state!=FD_GOSSIP_WFS_STATE_START ) ) return;
+  if( FD_LIKELY( !ctx->my_contact_info->shred_version || ctx->wfs_state!=FD_GOSSIP_WFS_STATE_WAIT ) ) return;
 
   /* gossvf should filter out messages with mismatching shred version */
   FD_TEST( ci->shred_version==ctx->my_contact_info->shred_version );
@@ -125,15 +124,21 @@ gossip_activity_update_fn( void *                           _ctx,
   if( FD_UNLIKELY( stake_idx>=ctx->wfs_stakes_cnt || memcmp( identity->uc, ctx->wfs_stakes[ stake_idx ].key.uc, sizeof(fd_pubkey_t) ) ) ) return;
 
   if( FD_LIKELY( change_type==FD_GOSSIP_ACTIVITY_CHANGE_TYPE_ACTIVE ) ) {
-    if( FD_UNLIKELY( !ctx->wfs_active[ stake_idx ] ) ) ctx->wfs_stake.online += ctx->wfs_stakes[ stake_idx ].stake;
+    if( FD_UNLIKELY( !ctx->wfs_active[ stake_idx ] ) ) {
+      ctx->wfs_stake.online += ctx->wfs_stakes[ stake_idx ].stake;
+      ctx->wfs_peers.online++;
+    }
     ctx->wfs_active[ stake_idx ] = 1;
   }
   if( FD_LIKELY( change_type==FD_GOSSIP_ACTIVITY_CHANGE_TYPE_INACTIVE ) ) {
-    if( FD_UNLIKELY( ctx->wfs_active[ stake_idx ] ) ) ctx->wfs_stake.online -= ctx->wfs_stakes[ stake_idx ].stake;
+    if( FD_UNLIKELY( ctx->wfs_active[ stake_idx ] ) ) {
+      ctx->wfs_stake.online -= ctx->wfs_stakes[ stake_idx ].stake;
+      ctx->wfs_peers.online--;
+    }
     ctx->wfs_active[ stake_idx ] = 0;
   }
 
-  if( FD_UNLIKELY( fd_ulong_if( ctx->wfs_stake.total>0UL, (100UL*ctx->wfs_stake.online) / ctx->wfs_stake.total, 0UL ) >= 80UL ) ) {
+  if( FD_UNLIKELY( ctx->wfs_stake.total>0UL && (100UL*ctx->wfs_stake.online) / ctx->wfs_stake.total >= 80UL ) ) {
     ctx->wfs_state = FD_GOSSIP_WFS_STATE_PUBLISH;
   }
 }
@@ -213,6 +218,10 @@ metrics_write( fd_gossip_tile_ctx_t * ctx ) {
   FD_MCNT_ENUM_COPY( GOSSIP, CRDS_TX_PULL_RESPONSE_BYTES, metrics->crds_tx_pull_response_bytes );
 
   FD_MCNT_ENUM_COPY( GOSSIP, CRDS_RX_COUNT,               metrics->crds_rx_count );
+
+  FD_MGAUGE_SET( GOSSIP, WFS_STAKED_PEERS_ONLINE, ctx->wfs_peers.online );
+  FD_MGAUGE_SET( GOSSIP, WFS_STAKE_ONLINE,        ctx->wfs_stake.online );
+  FD_MGAUGE_SET( GOSSIP, WFS_STATE, (ulong)ctx->wfs_state );
 }
 
 /* Minimum quiet period (no new peers discovered) before we declare
@@ -282,8 +291,8 @@ handle_local_vote( fd_gossip_tile_ctx_t * ctx,
 static void
 handle_epoch( fd_gossip_tile_ctx_t *      ctx,
               fd_epoch_info_msg_t const * msg ) {
-  ulong stakes_cnt = compute_id_weights_from_vote_weights( ctx->stake_weights_converted, msg->weights, msg->staked_cnt );
-  fd_gossip_stakes_update( ctx->gossip, ctx->stake_weights_converted, stakes_cnt );
+  fd_stake_weight_t const * weights = fd_epoch_info_msg_id_weights( msg );
+  fd_gossip_stakes_update( ctx->gossip, weights, msg->staked_id_cnt );
 }
 
 static void
@@ -318,7 +327,6 @@ handle_local_duplicate_shred( fd_gossip_tile_ctx_t *            ctx,
                               fd_gossip_duplicate_shred_t const chunk[FD_EQVOC_CHUNK_CNT],
                               fd_stem_context_t *               stem ) {
   if( FD_UNLIKELY( sig==FD_TOWER_SIG_SLOT_DUPLICATE ) ) {
-    FD_LOG_NOTICE(( "Received local duplicate shred from tower tile" ));
     long now = ctx->last_wallclock + (long)((double)(fd_tickcount()-ctx->last_tickcount)/ctx->ticks_per_ns);
     for( ulong i=0UL; i<FD_EQVOC_CHUNK_CNT; i++ ) fd_gossip_push_duplicate_shred( ctx->gossip, &chunk[i], stem, now );
   }
@@ -355,17 +363,22 @@ returnable_frag( fd_gossip_tile_ctx_t * ctx,
       if( FD_LIKELY( ctx->wfs_state==FD_GOSSIP_WFS_STATE_DONE ) ) break;
 
       if( FD_UNLIKELY( fd_ssmsg_sig_message( sig )==FD_SSMSG_DONE ) ) {
-        ctx->wfs_state = FD_GOSSIP_WFS_STATE_START;
+        ctx->wfs_state = FD_GOSSIP_WFS_STATE_WAIT;
         break;
       }
 
+      /* FIXME: Replace handling for this when manifest supports larger
+         vote and stake account bounds. */
       fd_snapshot_manifest_t const * manifest = fd_chunk_to_laddr( ctx->in[ in_idx ].mem, chunk );
 
       ulong wfs_stakes_unconverted_cnt = 0UL;
       ctx->wfs_stake.online = 0UL;
-      ctx->wfs_stake.total = 0UL;
+      ctx->wfs_stake.total  = 0UL;
+      ctx->wfs_peers.online = 0UL;
+      ctx->wfs_peers.total  = 0UL;
+      memset( ctx->wfs_active, 0, sizeof(ctx->wfs_active) );
 
-      FD_TEST( manifest->vote_accounts_len<=FD_RUNTIME_MAX_VOTE_ACCOUNTS );
+      FD_TEST( manifest->vote_accounts_len<=40200UL );
       for( ulong i=0UL; i<manifest->vote_accounts_len; i++ ) {
           if( FD_UNLIKELY( manifest->vote_accounts[ i ].stake==0UL ) ) continue;
           ctx->wfs_stake.total += manifest->vote_accounts[ i ].stake;
@@ -379,6 +392,10 @@ returnable_frag( fd_gossip_tile_ctx_t * ctx,
 
       /* sort for quick lookup */
       fd_stake_weight_key_sort_inplace( ctx->wfs_stakes, ctx->wfs_stakes_cnt );
+
+      ctx->wfs_peers.total = ctx->wfs_stakes_cnt;
+      FD_MGAUGE_SET( GOSSIP, WFS_STAKED_PEERS_TOTAL, ctx->wfs_peers.total );
+      FD_MGAUGE_SET( GOSSIP, WFS_STAKE_TOTAL,        ctx->wfs_stake.total );
 
       break;
     }
@@ -438,9 +455,6 @@ unprivileged_init( fd_topo_t *      topo,
   FD_SCRATCH_ALLOC_INIT( l, scratch );
   fd_gossip_tile_ctx_t * ctx = FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_gossip_tile_ctx_t), sizeof(fd_gossip_tile_ctx_t) );
   void * _gossip             = FD_SCRATCH_ALLOC_APPEND( l, fd_gossip_align(),             fd_gossip_footprint( tile->gossip.max_entries, tile->gossip.entrypoints_cnt ) );
-  void * _stake_weights      = FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_stake_weight_t),    MAX_STAKED_LEADERS*sizeof(fd_stake_weight_t) );
-
-  ctx->stake_weights_converted = (fd_stake_weight_t *)_stake_weights;
 
   FD_TEST( fd_rng_join( fd_rng_new( ctx->rng, ctx->rng_seed, ctx->rng_idx ) ) );
 

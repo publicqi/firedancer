@@ -314,6 +314,34 @@ fd_system_program_create_account( fd_exec_instr_ctx_t * ctx,
   return fd_system_program_transfer( ctx, lamports, from_acct_idx, to_acct_idx );
 }
 
+/* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L184-L214 */
+
+static int
+fd_system_program_create_account_allow_prefund( fd_exec_instr_ctx_t * ctx,
+                                                ushort               to_acct_idx,
+                                                ulong                lamports,
+                                                ulong                space,
+                                                fd_pubkey_t const *  owner,
+                                                fd_pubkey_t const *  to_address,
+                                                ushort               from_acct_idx ) {
+  int err;
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L198-L201 */
+  do {
+    fd_guarded_borrowed_account_t to = {0};
+    FD_TRY_BORROW_INSTR_ACCOUNT_DEFAULT_ERR_CHECK( ctx, to_acct_idx, &to );
+    err = fd_system_program_allocate_and_assign( ctx, &to, space, owner, to_address, NULL );
+    if( FD_UNLIKELY( err ) ) return err;
+  } while(0);
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L202-L212 */
+  if( FD_LIKELY( lamports > 0 ) ) {
+    return fd_system_program_transfer( ctx, lamports, from_acct_idx, to_acct_idx );
+  }
+
+  return FD_EXECUTOR_INSTR_SUCCESS;
+}
+
 /* https://github.com/solana-labs/solana/blob/v1.17.22/programs/system/src/system_processor.rs#L327-L352
 
    Matches Solana Labs system_processor SystemInstruction::CreateAccount { ... } => { ... } */
@@ -347,6 +375,41 @@ fd_system_program_exec_create_account( fd_exec_instr_ctx_t *                    
       &create_acc->owner,
       authority,
       NULL );
+}
+
+/* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L530-L563 */
+
+int
+fd_system_program_exec_create_account_allow_prefund( fd_exec_instr_ctx_t *                                  ctx,
+                                                     fd_system_program_instruction_create_account_t const * args ) {
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L535-L540 */
+  if( FD_UNLIKELY( !FD_FEATURE_ACTIVE_BANK( ctx->bank, create_account_allow_prefund ) ) ) {
+    return FD_EXECUTOR_INSTR_ERR_INVALID_INSTR_DATA;
+  }
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L541-L547 */
+  ushort from_acct_idx = 0;
+  if( args->lamports > 0 ) {
+    if( FD_UNLIKELY( fd_exec_instr_ctx_check_num_insn_accounts( ctx, 2U ) ) ) {
+      return FD_EXECUTOR_INSTR_ERR_MISSING_ACC;
+    }
+    from_acct_idx = 1;
+  } else {
+    if( FD_UNLIKELY( fd_exec_instr_ctx_check_num_insn_accounts( ctx, 1U ) ) ) {
+      return FD_EXECUTOR_INSTR_ERR_MISSING_ACC;
+    }
+  }
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L548-L552 */
+  ushort const to_acct_idx       = 0;
+  fd_pubkey_t const * to_address = NULL;
+  int err = fd_exec_instr_ctx_get_key_of_account_at_index( ctx, to_acct_idx, &to_address );
+  if( FD_UNLIKELY( err ) ) return err;
+
+  /* https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L553-L562 */
+  return fd_system_program_create_account_allow_prefund(
+      ctx, to_acct_idx, args->lamports, args->space, &args->owner, to_address, from_acct_idx );
 }
 
 /* https://github.com/solana-labs/solana/blob/v1.17.22/programs/system/src/system_processor.rs#L381-L393
@@ -642,16 +705,14 @@ fd_system_program_execute( fd_exec_instr_ctx_t * ctx ) {
   FD_EXEC_CU_UPDATE( ctx, 150UL );
   uchar instr_mem[ FD_SYSTEM_PROGRAM_INSTR_FOOTPRINT ] __attribute__((aligned(alignof(fd_system_program_instruction_t))));
 
-  int decode_err;
   fd_system_program_instruction_t * instruction = fd_bincode_decode_static_limited_deserialize(
       system_program_instruction,
       instr_mem,
       ctx->instr->data,
       ctx->instr->data_sz,
-      FD_TXN_MTU,
-      &decode_err
+      FD_TXN_MTU
   );
-  if( FD_UNLIKELY( decode_err ) ) {
+  if( FD_UNLIKELY( !instruction ) ) {
     return FD_EXECUTOR_INSTR_ERR_INVALID_INSTR_DATA;
   }
 
@@ -724,6 +785,12 @@ fd_system_program_execute( fd_exec_instr_ctx_t * ctx ) {
     result = fd_system_program_exec_upgrade_nonce_account( ctx );
     break;
   }
+  case fd_system_program_instruction_enum_create_account_allow_prefund: {
+    // https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/programs/system/src/system_processor.rs#L530-L563
+    result = fd_system_program_exec_create_account_allow_prefund(
+        ctx, &instruction->inner.create_account_allow_prefund );
+    break;
+  }
   }
 
   return result;
@@ -755,8 +822,7 @@ fd_get_system_account_kind( fd_account_meta_t const * meta ) {
   if( FD_UNLIKELY( !fd_bincode_decode_static(
       nonce_state_versions, versions,
       fd_account_data( meta ),
-      meta->dlen,
-      NULL ) ) ) {
+      meta->dlen ) ) ) {
     return FD_SYSTEM_PROGRAM_NONCE_ACCOUNT_KIND_UNKNOWN;
   }
 

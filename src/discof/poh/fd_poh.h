@@ -311,6 +311,7 @@
 #include "../../disco/stem/fd_stem.h"
 #include "../../util/fd_util_base.h"
 #include "../../ballet/sha256/fd_sha256.h"
+#include "../../util/clock/fd_clock.h"
 
 /* FD_POH_ALIGN is the alignment needed for a memory region to hold a
    fd_poh_t.  It is a positive integer power of 2. */
@@ -378,8 +379,15 @@ struct __attribute__((aligned(FD_POH_ALIGN))) fd_poh_private {
   double hashcnt_duration_ns;
   ulong  hashcnt_per_slot;
 
-  /* The maximum number of microblocks that the pack tile can publish in
-     each slot. */
+  /* The maximum number of real microblocks that the pack tile is
+     allowed to publish in each slot.
+
+     While we are leader, PoH internally treats this limit as having
+     one extra phantom "microblock" reserved for the done_packing
+     message, so that PoH does not finish the slot before pack
+     confirms it is done.  Pack itself is configured with the
+     un-inflated limit and never publishes more than this many real
+     microblocks per slot. */
   ulong max_microblocks_per_slot;
 
   /* The block id of the completed block. */
@@ -408,11 +416,6 @@ struct __attribute__((aligned(FD_POH_ALIGN))) fd_poh_private {
   ulong last_slot;
   ulong last_hashcnt;
 
-  /* If we have received the slot done message from pack yet.  We are
-     not allowed to fully finish hashing the block until this happens so
-     that we know which slot the slot_done message is arriving for. */
-  int slot_done;
-
   /* The PoH tile must never drop microblocks that get committed by the
      bank, so it needs to always be able to mixin a microblock hash.
      Mixing in requires incrementing the hashcnt, so we need to ensure
@@ -435,6 +438,13 @@ struct __attribute__((aligned(FD_POH_ALIGN))) fd_poh_private {
   uchar skipped_tick_hashes[ MAX_SKIPPED_TICKS ][ 32 ];
 
   fd_sha256_t * sha256;
+
+  fd_clock_t clock[ 1 ];
+  long       recal_next;
+
+  fd_clock_epoch_t clock_epoch[ 1 ];
+
+  uchar __attribute__((aligned(FD_CLOCK_ALIGN))) clock_mem[ FD_CLOCK_FOOTPRINT ];
 
   fd_poh_out_t shred_out[ 1 ];
   fd_poh_out_t replay_out[ 1 ];
@@ -510,6 +520,15 @@ fd_poh1_mixin( fd_poh_t *          poh,
                uchar const *       hash,
                ulong               txn_cnt,
                fd_txn_p_t const *  txns );
+
+/* fd_poh_update_max_microblocks: Tighten the upper bound on
+   max_microblocks_per_slot using the latest bound from pack.
+   new_max is the un-inflated bound (pack's view).  PoH inflates
+   by +1 which causes it to wait for pack's slot_done message before
+   finishing a slot. */
+void
+fd_poh_update_max_microblocks( fd_poh_t * poh,
+                               ulong      new_max );
 
 FD_PROTOTYPES_END
 

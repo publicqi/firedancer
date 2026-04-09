@@ -80,6 +80,20 @@ struct fd_snapin_tile {
 
   ulong advertised_slot;
   ulong bank_slot;
+  ulong epoch;
+
+  ulong full_genesis_creation_time_seconds;
+  uchar advertised_hash[ FD_HASH_FOOTPRINT ];
+
+  /* TODO: remove capitalization tracking when snapshot loading into
+     funk goes away */
+  ulong capitalization;          /* tracks capitalization of all loaded accounts in the current snapshot */
+  ulong dup_capitalization;      /* tracks capitalization of duplicate accounts encountered during incremental snapshot loading */
+  ulong manifest_capitalization; /* capitalization according to the current snapshot manifest */
+
+  struct {
+    ulong capitalization;
+  } recovery; /* stores the capitalization value from the last full snapshot */
 
   ulong blockhash_offsets_len;
   blockhash_group_t * blockhash_offsets;
@@ -117,6 +131,9 @@ struct fd_snapin_tile {
   fd_snapin_out_link_t manifest_out;
   fd_snapin_out_link_t gui_out;
   fd_snapin_out_link_t hash_out;
+
+  ulong gui_config_acct_sz;   /* total expected account data length (0 when not accumulating) */
+  ulong gui_config_acct_off;  /* bytes accumulated so far into the current gui_out link chunk */
 
   struct {
     uchar * pair;

@@ -20,9 +20,9 @@ extern fd_topo_obj_callbacks_t fd_obj_cb_store;
 extern fd_topo_obj_callbacks_t fd_obj_cb_fec_sets;
 extern fd_topo_obj_callbacks_t fd_obj_cb_txncache;
 extern fd_topo_obj_callbacks_t fd_obj_cb_banks;
-extern fd_topo_obj_callbacks_t fd_obj_cb_banks_locks;
 extern fd_topo_obj_callbacks_t fd_obj_cb_funk;
 extern fd_topo_obj_callbacks_t fd_obj_cb_funk_locks;
+extern fd_topo_obj_callbacks_t fd_obj_cb_progcache;
 extern fd_topo_obj_callbacks_t fd_obj_cb_acc_pool;
 extern fd_topo_obj_callbacks_t fd_obj_cb_rnonce_ss;
 
@@ -49,9 +49,9 @@ fd_topo_obj_callbacks_t * CALLBACKS[] = {
   &fd_obj_cb_fec_sets,
   &fd_obj_cb_txncache,
   &fd_obj_cb_banks,
-  &fd_obj_cb_banks_locks,
   &fd_obj_cb_funk,
   &fd_obj_cb_funk_locks,
+  &fd_obj_cb_progcache,
   &fd_obj_cb_vinyl_meta,
   &fd_obj_cb_vinyl_meta_ele,
   &fd_obj_cb_vinyl_data,

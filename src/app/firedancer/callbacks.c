@@ -5,6 +5,7 @@
 #include "../../flamenco/runtime/fd_bank.h"
 #include "../../flamenco/runtime/fd_acc_pool.h"
 #include "../../flamenco/runtime/fd_txncache_shmem.h"
+#include "../../flamenco/progcache/fd_progcache.h"
 #include "../../funk/fd_funk.h"
 #include "../../disco/shred/fd_rnonce_ss.h"
 
@@ -12,31 +13,6 @@
   ulong __x = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "obj.%lu.%s", obj->id, name );      \
   if( FD_UNLIKELY( __x==ULONG_MAX ) ) FD_LOG_ERR(( "obj.%lu.%s was not set", obj->id, name )); \
   __x; }))
-
-static ulong
-banks_locks_footprint( fd_topo_t const *     topo FD_PARAM_UNUSED,
-                       fd_topo_obj_t const * obj FD_PARAM_UNUSED ) {
-  return sizeof(fd_banks_locks_t);
-}
-
-static ulong
-banks_locks_align( fd_topo_t const *     topo FD_PARAM_UNUSED,
-                   fd_topo_obj_t const * obj FD_PARAM_UNUSED ) {
-  return alignof(fd_banks_locks_t);
-}
-
-static void
-banks_locks_new( fd_topo_t const *     topo,
-                 fd_topo_obj_t const * obj ) {
-  fd_banks_locks_init( fd_topo_obj_laddr( topo, obj->id ) );
-}
-
-fd_topo_obj_callbacks_t fd_obj_cb_banks_locks = {
-  .name      = "banks_locks",
-  .footprint = banks_locks_footprint,
-  .align     = banks_locks_align,
-  .new       = banks_locks_new,
-};
 
 static ulong
 banks_footprint( fd_topo_t const *     topo,
@@ -119,6 +95,41 @@ fd_topo_obj_callbacks_t fd_obj_cb_funk_locks = {
   .new       = funk_locks_new,
 };
 
+static ulong
+progcache_align( fd_topo_t const *     topo,
+                 fd_topo_obj_t const * obj ) {
+  (void)topo; (void)obj;
+  return fd_progcache_shmem_align();
+}
+
+static ulong
+progcache_footprint( fd_topo_t const *     topo,
+                     fd_topo_obj_t const * obj ) {
+  return fd_progcache_shmem_footprint( VAL("txn_max"), VAL("rec_max") );
+}
+
+static ulong
+progcache_loose( fd_topo_t const *     topo,
+                 fd_topo_obj_t const * obj ) {
+  return VAL("heap_max");
+}
+
+static void
+progcache_new( fd_topo_t const *     topo,
+               fd_topo_obj_t const * obj ) {
+  ulong seed = fd_pod_queryf_ulong( topo->props, 0UL, "obj.%lu.seed", obj->id );
+  if( !seed ) FD_TEST( fd_rng_secure( &seed, sizeof(ulong) ) );
+  FD_TEST( fd_progcache_shmem_new( fd_topo_obj_laddr( topo, obj->id ), 2UL, seed, VAL("txn_max"), VAL("rec_max") ) );
+}
+
+fd_topo_obj_callbacks_t fd_obj_cb_progcache = {
+  .name      = "progcache",
+  .footprint = progcache_footprint,
+  .loose     = progcache_loose,
+  .align     = progcache_align,
+  .new       = progcache_new,
+};
+
 /* cnc: a tile admin message queue */
 
 static ulong
@@ -175,7 +186,7 @@ fd_topo_obj_callbacks_t fd_obj_cb_fec_sets = {
 static ulong
 store_footprint( fd_topo_t const * topo,
                  fd_topo_obj_t const * obj ) {
-  return fd_store_footprint( VAL("fec_max") );
+  return fd_store_footprint( VAL("fec_max"), VAL("fec_data_max") );
 }
 
 static ulong
@@ -187,7 +198,7 @@ store_align( fd_topo_t const *     topo FD_FN_UNUSED,
 static void
 store_new( fd_topo_t const *     topo,
            fd_topo_obj_t const * obj ) {
-  FD_TEST( fd_store_new( fd_topo_obj_laddr( topo, obj->id ), VAL("fec_max"), VAL("part_cnt") ) );
+  FD_TEST( fd_store_new( fd_topo_obj_laddr( topo, obj->id ), VAL("part_cnt"), VAL("fec_max"), VAL("fec_data_max") ) );
 }
 
 fd_topo_obj_callbacks_t fd_obj_cb_store = {
@@ -225,7 +236,7 @@ fd_topo_obj_callbacks_t fd_obj_cb_txncache = {
 static ulong
 acc_pool_footprint( fd_topo_t const *     topo,
                     fd_topo_obj_t const * obj ) {
-  return fd_acc_pool_footprint( VAL("max_account_cnt") );
+  return fd_acc_pool_footprint( VAL("concurrent_account_limit") );
 }
 
 static ulong
@@ -237,7 +248,7 @@ acc_pool_align( fd_topo_t const *     topo FD_FN_UNUSED,
 static void
 acc_pool_new( fd_topo_t const *     topo,
               fd_topo_obj_t const * obj ) {
-  FD_TEST( fd_acc_pool_new( fd_topo_obj_laddr( topo, obj->id ), VAL("max_account_cnt") ) );
+  FD_TEST( fd_acc_pool_new( fd_topo_obj_laddr( topo, obj->id ), VAL("concurrent_account_limit") ) );
 }
 
 fd_topo_obj_callbacks_t fd_obj_cb_acc_pool = {

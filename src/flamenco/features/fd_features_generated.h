@@ -8,10 +8,10 @@
 #endif
 
 /* FEATURE_ID_CNT is the number of features in ids */
-#define FD_FEATURE_ID_CNT (263UL)
+#define FD_FEATURE_ID_CNT (270UL)
 
 /* Feature set ID calculated from all feature names */
-#define FD_FEATURE_SET_ID (3735554381U)
+#define FD_FEATURE_SET_ID (2063095389U)
 
 union fd_features {
   ulong f[ FD_FEATURE_ID_CNT ];
@@ -225,7 +225,7 @@ union fd_features {
     /* 0xe5937c9dd5edd306 */ ulong reenable_sbpf_v0_execution;
     /* 0xefc2cb9c2b40f3ff */ ulong enable_sbpf_v1_deployment_and_execution;
     /* 0x408e6a8a269a6ad1 */ ulong enable_sbpf_v2_deployment_and_execution;
-    /* 0x66ee381e7be8bc9b */ ulong enable_sbpf_v3_deployment_and_execution;
+    /* 0x0f1fc5fdd7907244 */ ulong enable_sbpf_v3_deployment_and_execution;
     /* 0xf46b1f18665c4236 */ ulong migrate_feature_gate_program_to_core_bpf;
     /* 0xa9a90df1904da912 */ ulong migrate_config_program_to_core_bpf;
     /* 0x2434a84be5b684a5 */ ulong migrate_address_lookup_table_program_to_core_bpf;
@@ -259,8 +259,9 @@ union fd_features {
     /* 0x3711b30f40730240 */ ulong enable_vote_address_leader_schedule;
     /* 0xc1309d1b0ae3e80c */ ulong enshrine_slashing_program;
     /* 0x5c64cc1a9be3790a */ ulong raise_account_cu_limit;
-    /* 0x5004d84d60aadc0c */ ulong stricter_abi_and_runtime_constraints;
-    /* 0x520c5e674243fab5 */ ulong account_data_direct_mapping;
+    /* 0x14bfb27001414cc4 */ ulong syscall_parameter_address_restrictions;
+    /* 0xce2f9f1c3aeba901 */ ulong virtual_address_space_adjustments;
+    /* 0x35639bb5e67799a9 */ ulong account_data_direct_mapping;
     /* 0xf08a42c3c040e908 */ ulong fix_alt_bn128_pairing_length_check;
     /* 0x8c7bee4552d93e0c */ ulong poseidon_enforce_padding;
     /* 0x99e38f77f30f2b34 */ ulong relax_intrabatch_account_locks;
@@ -271,13 +272,19 @@ union fd_features {
     /* 0xdab5b6a991a03e4b */ ulong static_instruction_limit;
     /* 0x8921a3abf23afaec */ ulong vote_state_v4;
     /* 0x640dddd90caae808 */ ulong alt_bn128_little_endian;
-    /* 0x6a9db4aa29bdb608 */ ulong enable_bls12_381_syscall;
+    /* 0x9e11ee2f4bbcb608 */ ulong enable_bls12_381_syscall;
     /* 0x010f656d89a4e808 */ ulong enable_alt_bn128_g2_syscalls;
     /* 0xfc12b1cef363afa7 */ ulong switch_to_chacha8_turbine;
     /* 0x3727b6b01b8a6c1c */ ulong bls_pubkey_management_in_vote_account;
     /* 0xa5ce8f931961b80c */ ulong relax_programdata_account_check_migration;
     /* 0xf55c421c9eccc012 */ ulong remove_simple_vote_from_cost_model;
-    /* 0x73869887e8eb4903 */ ulong limit_instruction_accounts;
-    /* 0x8b0786cd93f63607 */ ulong validator_admission_ticket;
+    /* 0x7428565ab3b6d152 */ ulong limit_instruction_accounts;
+    /* 0xd2ff523ae3f23607 */ ulong validator_admission_ticket;
+    /* 0x6d9baef98a3cfd0c */ ulong discard_unexpected_data_complete_shreds;
+    /* 0x632b9b7c9e9a3257 */ ulong create_account_allow_prefund;
+    /* 0xa4c86f030ee0440c */ ulong replace_spl_token_with_p_token;
+    /* 0xf5434d796d0f975a */ ulong delay_commission_updates;
+    /* 0x7f5bea39613bbc0d */ ulong validate_chained_block_id;
+    /* 0xfde26f7b21c28506 */ ulong upgrade_bpf_stake_program_to_v5;
   };
 };

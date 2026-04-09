@@ -53,8 +53,8 @@ struct fd_execrp_tile {
   /* A transaction can be executed as long as there is a valid handle to
      a funk_txn and a bank. These are queried from fd_banks_t and
      fd_funk_t. */
-  fd_banks_t            banks[1];
-  fd_bank_t             bank[1];
+  fd_banks_t *          banks;
+  fd_bank_t *           bank;
   fd_accdb_user_t       accdb[1];
   fd_progcache_t        progcache[1];
 
@@ -115,14 +115,21 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
 
 static void
 metrics_write( fd_execrp_tile_t * ctx ) {
-  fd_progcache_t * progcache = ctx->progcache;
+  fd_progcache_metrics_t * pm = ctx->progcache->metrics;
 
-  FD_MCNT_SET( EXECRP, PROGCACHE_MISSES,        progcache->metrics->miss_cnt       );
-  FD_MCNT_SET( EXECRP, PROGCACHE_HITS,          progcache->metrics->hit_cnt        );
-  FD_MCNT_SET( EXECRP, PROGCACHE_FILLS,         progcache->metrics->fill_cnt       );
-  FD_MCNT_SET( EXECRP, PROGCACHE_FILL_TOT_SZ,   progcache->metrics->fill_tot_sz    );
-  FD_MCNT_SET( EXECRP, PROGCACHE_INVALIDATIONS, progcache->metrics->invalidate_cnt );
-  FD_MCNT_SET( EXECRP, PROGCACHE_DUP_INSERTS,   progcache->metrics->dup_insert_cnt );
+  FD_MCNT_SET( EXECRP, PROGCACHE_LOOKUPS,                pm->lookup_cnt     );
+  FD_MCNT_SET( EXECRP, PROGCACHE_HITS,                   pm->hit_cnt        );
+  FD_MCNT_SET( EXECRP, PROGCACHE_MISSES,                 pm->miss_cnt       );
+  FD_MCNT_SET( EXECRP, PROGCACHE_OOM_HEAP,               pm->oom_heap_cnt   );
+  FD_MCNT_SET( EXECRP, PROGCACHE_OOM_DESC,               pm->oom_desc_cnt   );
+  FD_MCNT_SET( EXECRP, PROGCACHE_FILLS,                  pm->fill_cnt       );
+  FD_MCNT_SET( EXECRP, PROGCACHE_FILL_BYTES,             pm->fill_tot_sz    );
+  FD_MCNT_SET( EXECRP, PROGCACHE_SPILLS,                 pm->spill_cnt      );
+  FD_MCNT_SET( EXECRP, PROGCACHE_SPILL_BYTES,            pm->spill_tot_sz   );
+  FD_MCNT_SET( EXECRP, PROGCACHE_EVICTIONS,              pm->evict_cnt      );
+  FD_MCNT_SET( EXECRP, PROGCACHE_EVICTION_BYTES,         pm->evict_tot_sz   );
+  FD_MCNT_SET( EXECRP, PROGCACHE_DURATION_TOTAL_SECONDS, pm->cum_pull_ticks );
+  FD_MCNT_SET( EXECRP, PROGCACHE_DURATION_LOAD_SECONDS,  pm->cum_load_ticks );
 
   FD_MCNT_SET( EXECRP, TXN_REGIME_SETUP,  ctx->metrics.txn_setup_cum_ticks   );
   FD_MCNT_SET( EXECRP, TXN_REGIME_EXEC,   ctx->metrics.txn_exec_cum_ticks    );
@@ -151,7 +158,7 @@ static void
 publish_txn_finalized_msg( fd_execrp_tile_t *  ctx,
                            fd_stem_context_t * stem ) {
   fd_execrp_task_done_msg_t * msg  = fd_chunk_to_laddr( ctx->execrp_replay_out->mem, ctx->execrp_replay_out->chunk );
-  msg->bank_idx                  = ctx->bank->data->idx;
+  msg->bank_idx                  = ctx->bank->idx;
   msg->txn_exec->txn_idx         = ctx->txn_idx;
   msg->txn_exec->is_committable  = ctx->txn_out.err.is_committable;
   msg->txn_exec->is_fees_only    = ctx->txn_out.err.is_fees_only;
@@ -199,7 +206,8 @@ returnable_frag( fd_execrp_tile_t *  ctx,
       case FD_EXECRP_TT_TXN_EXEC: {
         /* Execute. */
         fd_execrp_txn_exec_msg_t * msg = fd_chunk_to_laddr( ctx->replay_in->mem, chunk );
-        FD_TEST( fd_banks_bank_query( ctx->bank, ctx->banks, msg->bank_idx ) );
+        ctx->bank = fd_banks_bank_query( ctx->banks, msg->bank_idx );
+        FD_TEST( ctx->bank );
         ctx->txn_in.txn = msg->txn;
 
         /* Set the capture txn index from the message so account updates
@@ -228,7 +236,7 @@ returnable_frag( fd_execrp_tile_t *  ctx,
         /* Notify replay. */
         ctx->txn_idx = msg->txn_idx;
         ctx->dispatch_time_comp = tspub;
-        ctx->slot = fd_bank_slot_get( ctx->bank );
+        ctx->slot = ctx->bank->f.slot;
         publish_txn_finalized_msg( ctx, stem );
 
         /* Update metrics */
@@ -279,6 +287,8 @@ returnable_frag( fd_execrp_tile_t *  ctx,
 
   return 0;
 }
+
+extern FD_TL int fd_wksp_oom_silent;
 
 static void
 unprivileged_init( fd_topo_t *      topo,
@@ -343,12 +353,8 @@ unprivileged_init( fd_topo_t *      topo,
     FD_LOG_ERR(( "Could not find topology object for banks" ));
   }
 
-  ulong banks_locks_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "banks_locks" );
-  if( FD_UNLIKELY( banks_locks_obj_id==ULONG_MAX ) ) {
-    FD_LOG_ERR(( "Could not find topology object for banks_locks" ));
-  }
-
-  if( FD_UNLIKELY( !fd_banks_join( ctx->banks, fd_topo_obj_laddr( topo, banks_obj_id ), fd_topo_obj_laddr( topo, banks_locks_obj_id ) ) ) ) {
+  ctx->banks = fd_banks_join( fd_topo_obj_laddr( topo, banks_obj_id ) );
+  if( FD_UNLIKELY( !ctx->banks ) ) {
     FD_LOG_ERR(( "Failed to join banks" ));
   }
 
@@ -468,6 +474,8 @@ unprivileged_init( fd_topo_t *      topo,
 
   memset( &ctx->metrics,          0, sizeof(ctx->metrics)          );
   memset( &ctx->runtime->metrics, 0, sizeof(ctx->runtime->metrics) );
+
+  fd_wksp_oom_silent = 1;
 }
 
 static ulong

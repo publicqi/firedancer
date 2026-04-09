@@ -1,5 +1,4 @@
-#include "fd_ghost.h"
-#include "fd_ghost_private.h"
+#include "fd_ghost.c"
 
 void setup_block_ids( fd_hash_t * block_ids, ulong cnt ) {
   for( ulong i = 0; i < cnt; i++ ) block_ids[i] = (fd_hash_t){ .ul = { i } };
@@ -24,13 +23,13 @@ setup_ghost( fd_wksp_t * wksp, ulong blk_max, ulong vtr_max ) {
   fd_ghost_t * ghost = fd_ghost_join( fd_ghost_new( mem, blk_max, vtr_max, 42UL ) );
   FD_TEST( ghost );
   fd_hash_t block_ids[7]; setup_block_ids( block_ids, 7 );
-  fd_ghost_insert( ghost, &block_ids[0], NULL         , 0 );
-  fd_ghost_insert( ghost, &block_ids[1], &block_ids[0], 1 );
-  fd_ghost_insert( ghost, &block_ids[2], &block_ids[1], 2 );
-  fd_ghost_insert( ghost, &block_ids[3], &block_ids[1], 3 );
-  fd_ghost_insert( ghost, &block_ids[4], &block_ids[2], 4 );
-  fd_ghost_insert( ghost, &block_ids[5], &block_ids[3], 5 );
-  fd_ghost_insert( ghost, &block_ids[6], &block_ids[5], 6 );
+  fd_ghost_init(   ghost, 0, &block_ids[0] );
+  fd_ghost_insert( ghost, 1, &block_ids[1], &block_ids[0] );
+  fd_ghost_insert( ghost, 2, &block_ids[2], &block_ids[1] );
+  fd_ghost_insert( ghost, 3, &block_ids[3], &block_ids[1] );
+  fd_ghost_insert( ghost, 4, &block_ids[4], &block_ids[2] );
+  fd_ghost_insert( ghost, 5, &block_ids[5], &block_ids[3] );
+  fd_ghost_insert( ghost, 6, &block_ids[6], &block_ids[5] );
   return ghost;
 }
 
@@ -39,10 +38,10 @@ teardown_ghost( fd_ghost_t * ghost ) {
   fd_wksp_free_laddr( fd_ghost_delete( fd_ghost_leave( ghost ) ) );
 }
 
-// fd_tower_voters_t *
+// fd_tower_vtr_t *
 // setup_tower_voters( fd_wksp_t * wksp, ulong max, ... ) {
-//   void * mem = fd_wksp_alloc_laddr( wksp, fd_tower_voters_align(), fd_tower_voters_footprint( max ), 1UL );
-//   fd_tower_voters_t * tower_voters = fd_tower_voters_join( fd_tower_voters_new( mem, max ) );
+//   void * mem = fd_wksp_alloc_laddr( wksp, fd_tower_vtr_align(), fd_tower_vtr_footprint( max ), 1UL );
+//   fd_tower_vtr_t * tower_voters = fd_tower_vtr_join( fd_tower_vtr_new( mem, max ) );
 //   FD_TEST( tower_voters );
 
 //   va_list ap;
@@ -59,15 +58,15 @@ teardown_ghost( fd_ghost_t * ghost ) {
 //     state->cnt  = 1;
 //     state->votes[0] = (fd_vote_acc_vote_t){ .slot = vote };
 
-//     fd_tower_voters_push_tail( tower_voters, (fd_tower_voters_t){ .addr = (fd_pubkey_t){ .ul = { addr } }, .stake = stake, .data = data } );
+//     fd_tower_vtr_push_tail( tower_voters, (fd_tower_vtr_t){ .addr = (fd_pubkey_t){ .ul = { addr } }, .stake = stake, .data = data } );
 //   }
 //   va_end( ap );
 //   return tower_voters;
 // }
 
 // void
-// teardown_tower_voters( fd_tower_voters_t * accts ) {
-//   fd_wksp_free_laddr( fd_tower_voters_delete( fd_tower_voters_leave( accts ) ) );
+// teardown_tower_voters( fd_tower_vtr_t * accts ) {
+//   fd_wksp_free_laddr( fd_tower_vtr_delete( fd_tower_vtr_leave( accts ) ) );
 // }
 
 void
@@ -109,9 +108,13 @@ test_publish_left( fd_wksp_t * wksp ) {
   fd_ghost_t * ghost = setup_ghost( wksp, 8, 8 );
   fd_hash_t    block_ids[7]; setup_block_ids( block_ids, 7 );
 
+  FD_TEST( ghost->width == 2 );
+
   fd_ghost_blk_t * blk2 = fd_ghost_query( ghost, &block_ids[2] );
   FD_TEST( blk2 );
   fd_ghost_publish( ghost, blk2 );
+
+  FD_TEST( ghost->width == 1 );
 
   FD_TEST( !fd_ghost_query( ghost, &block_ids[0] ) );
   FD_TEST( !fd_ghost_query( ghost, &block_ids[1] ) );
@@ -158,9 +161,13 @@ test_publish_right( fd_wksp_t * wksp ) {
   fd_ghost_t * ghost = setup_ghost( wksp, 8, 8 );
   fd_hash_t block_ids[7]; setup_block_ids( block_ids, 7 );
 
+  FD_TEST( ghost->width == 2 );
+
   fd_ghost_blk_t * blk3 = fd_ghost_query( ghost, &block_ids[3] );
   FD_TEST( blk3 );
   fd_ghost_publish( ghost, blk3 );
+
+  FD_TEST( ghost->width == 1 );
 
   FD_TEST( !fd_ghost_query( ghost, &block_ids[0] ) );
   FD_TEST( !fd_ghost_query( ghost, &block_ids[1] ) );
@@ -862,6 +869,44 @@ test_ignore_out_of_order_vote( fd_wksp_t * wksp ) {
 // }
 
 
+void
+test_npow2_init( fd_wksp_t * wksp ) {
+  ulong npow2_blk_maxs[] = { 7, 10, 13, 17, 33, 65, 100 };
+  ulong cnt = sizeof(npow2_blk_maxs) / sizeof(npow2_blk_maxs[0]);
+
+  for( ulong i = 0; i < cnt; i++ ) {
+    ulong blk_max = npow2_blk_maxs[i];
+    ulong vtr_max = blk_max;
+
+    /* Verify footprint is nonzero. */
+    ulong footprint = fd_ghost_footprint( blk_max, vtr_max );
+    FD_TEST( footprint );
+
+    /* new / join */
+    void * mem = fd_wksp_alloc_laddr( wksp, fd_ghost_align(), footprint, 42UL );
+    FD_TEST( mem );
+    fd_ghost_t * ghost = fd_ghost_join( fd_ghost_new( mem, blk_max, vtr_max, 42UL ) );
+    FD_TEST( ghost );
+
+    /* Insert a small tree and verify. */
+    fd_hash_t ids[4];
+    for( ulong j = 0; j < 4; j++ ) ids[j] = (fd_hash_t){ .ul = { j + 1 } };
+    fd_ghost_init(   ghost, 0, &ids[0] );
+    fd_ghost_insert( ghost, 1, &ids[1], &ids[0] );
+    fd_ghost_insert( ghost, 2, &ids[2], &ids[1] );
+    fd_ghost_insert( ghost, 3, &ids[3], &ids[1] );
+
+    FD_TEST( fd_ghost_query( ghost, &ids[0] ) );
+    FD_TEST( fd_ghost_query( ghost, &ids[1] ) );
+    FD_TEST( fd_ghost_query( ghost, &ids[2] ) );
+    FD_TEST( fd_ghost_query( ghost, &ids[3] ) );
+    FD_TEST( !fd_ghost_verify( ghost ) );
+
+    /* Cleanup */
+    fd_wksp_free_laddr( fd_ghost_delete( fd_ghost_leave( ghost ) ) );
+  }
+}
+
 int
 main( int argc, char ** argv ) {
   fd_boot( &argc, &argv );
@@ -878,6 +923,7 @@ main( int argc, char ** argv ) {
   test_publish_right( wksp );
   test_best( wksp );
   test_ignore_out_of_order_vote( wksp );
+  test_npow2_init( wksp );
   // test_vote_leaves( wksp );
   // test_best_full_tree( wksp );
   // test_rooted_vote( wksp );

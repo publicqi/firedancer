@@ -11,6 +11,8 @@
 #include "../../flamenco/runtime/fd_txncache.h"
 #include "../../flamenco/runtime/fd_system_ids.h"
 #include "../../flamenco/runtime/sysvar/fd_sysvar_slot_history.h"
+#include "../../flamenco/runtime/fd_hashes.h"
+#include "../../flamenco/runtime/sysvar/fd_sysvar_epoch_schedule.h"
 #include "../../flamenco/types/fd_types.h"
 #include "../../util/pod/fd_pod.h"
 
@@ -137,8 +139,7 @@ verify_slot_deltas_with_slot_history( fd_snapin_tile_t * ctx ) {
           slot_history,
           &decoded.o,
           data,
-          meta.dlen,
-          NULL )
+          meta.dlen )
   ) ) {
     FD_LOG_WARNING(( "SlotHistory sysvar account data is corrupt" ));
     return -1;
@@ -195,9 +196,18 @@ verify_slot_deltas_with_slot_history( fd_snapin_tile_t * ctx ) {
 /* verification of epoch stakes from manifest
    https://github.com/anza-xyz/agave/blob/v3.1.8/runtime/src/snapshot_bank_utils.rs#L632 */
 static int
-verify_epoch_stakes( fd_snapin_tile_t * ctx, fd_snapshot_manifest_t const * manifest ) {
-  ulong min_required_epoch = manifest->epoch;
-  ulong max_required_epoch = fd_ssmanifest_parser_leader_schedule_epoch( ctx->manifest_parser );
+verify_epoch_stakes( fd_snapshot_manifest_t const * manifest ) {
+
+  fd_epoch_schedule_t epoch_schedule = (fd_epoch_schedule_t){
+    .slots_per_epoch             = manifest->epoch_schedule_params.slots_per_epoch,
+    .leader_schedule_slot_offset = manifest->epoch_schedule_params.leader_schedule_slot_offset,
+    .warmup                      = manifest->epoch_schedule_params.warmup,
+    .first_normal_epoch          = manifest->epoch_schedule_params.first_normal_epoch,
+    .first_normal_slot           = manifest->epoch_schedule_params.first_normal_slot,
+  };
+
+  ulong min_required_epoch = fd_slot_to_epoch( &epoch_schedule, manifest->slot, NULL );
+  ulong max_required_epoch = fd_slot_to_leader_schedule_epoch( &epoch_schedule, manifest->slot );
 
   /* ensure all required epochs are present in epoch stakes */
   for( ulong i=min_required_epoch; i<=max_required_epoch; i++ ) {
@@ -228,8 +238,66 @@ verify_slot_deltas_with_bank_slot( fd_snapin_tile_t * ctx,
     /* VerifySlotDeltasError::SlotGreaterThanMaxRoot
        https://github.com/anza-xyz/agave/blob/v3.1.8/snapshots/src/error.rs#L138
        https://github.com/anza-xyz/agave/blob/v3.1.8/runtime/src/snapshot_bank_utils.rs#L550 */
-    if( FD_UNLIKELY( entry->slot>bank_slot ) ) return -1;
+    if( FD_UNLIKELY( entry->slot>bank_slot ) ) {
+      FD_LOG_WARNING(( "entry slot %lu is greater than bank slot %lu", entry->slot, bank_slot ));
+      return -1;
+    }
   }
+  return 0;
+}
+
+static int
+verify_bank_hash( fd_snapin_tile_t const *       ctx,
+                  fd_snapshot_manifest_t const * manifest ) {
+  if( FD_UNLIKELY( manifest->blockhashes_len==0UL ) ) {
+    FD_LOG_WARNING(( "%s manifest for epoch %lu and slot %lu has no blockhashes",
+                     ctx->full?"full":"incr", ctx->epoch, manifest->slot ));
+    return -1;
+  }
+
+  if( FD_UNLIKELY( !manifest->has_accounts_lthash ) ) {
+    FD_LOG_WARNING(( "%s manifest for epoch %lu and slot %lu is missing accounts lthash",
+                     ctx->full?"full":"incr", ctx->epoch, manifest->slot ));
+    return -1;
+  }
+
+  /* find the last blockhash */
+  ulong max_hash_idx = 0UL;
+  ulong last_bh_idx  = 0UL;
+  for( ulong i=0UL; i<manifest->blockhashes_len; i++ ) {
+    if( FD_LIKELY( manifest->blockhashes[ i ].hash_index > max_hash_idx ) ) {
+      max_hash_idx = manifest->blockhashes[ i ].hash_index;
+      last_bh_idx  = i;
+    }
+  }
+
+  /* fd_lthash_value_t is aligned to 64B but the accounts_lthash in the
+     manifest may not be because its simply a uchar array.  Copy is
+     needed to avoid undefined behavior. */
+  fd_lthash_value_t accounts_lthash[ 1UL ];
+  fd_memcpy( accounts_lthash, manifest->accounts_lthash, sizeof(fd_lthash_value_t) );
+
+  fd_hash_t const * parent_bank_hash = (fd_hash_t const *)fd_type_pun_const( manifest->parent_bank_hash );
+  fd_hash_t const * last_blockhash   = (fd_hash_t const *)fd_type_pun_const( manifest->blockhashes[ last_bh_idx ].hash );
+  fd_hash_t         computed_bank_hash[ 1UL ];
+  fd_hashes_hash_bank( accounts_lthash, parent_bank_hash, last_blockhash, manifest->signature_count, computed_bank_hash );
+  fd_hashes_apply_hard_forks(
+      computed_bank_hash,
+      manifest->slot,
+      manifest->parent_slot,
+      manifest->hard_forks,
+      manifest->hard_forks_cnts,
+      manifest->hard_forks_len );
+
+  if( FD_UNLIKELY( memcmp( computed_bank_hash, manifest->bank_hash, FD_HASH_FOOTPRINT ) ) ) {
+    FD_BASE58_ENCODE_32_BYTES( computed_bank_hash->hash, computed_bank_hash_enc );
+    FD_BASE58_ENCODE_32_BYTES( manifest->bank_hash, manifest_bank_hash_enc );
+    FD_LOG_WARNING(( "%s manifest for epoch %lu and slot %lu bank hash verification failed: computed %s does not match manifest %s",
+                     ctx->full?"full":"incr", ctx->epoch, manifest->slot,
+                     computed_bank_hash_enc, manifest_bank_hash_enc ));
+    return -1;
+  }
+
   return 0;
 }
 
@@ -468,7 +536,7 @@ process_manifest( fd_snapin_tile_t * ctx ) {
   fd_snapshot_manifest_t * manifest = fd_chunk_to_laddr( ctx->manifest_out.mem, ctx->manifest_out.chunk );
 
   if( FD_UNLIKELY( ctx->advertised_slot!=manifest->slot ) ) {
-    /* SnapshotError::MismatchedSlot:
+    /* SnapshotError::MismatchedSlot
        https://github.com/anza-xyz/agave/blob/v3.1.8/runtime/src/snapshot_bank_utils.rs#L472 */
     FD_LOG_WARNING(( "snapshot manifest bank slot %lu does not match advertised slot %lu from snapshot peer",
                      manifest->slot, ctx->advertised_slot ));
@@ -476,14 +544,63 @@ process_manifest( fd_snapin_tile_t * ctx ) {
     return;
   }
 
+  if( FD_UNLIKELY( !manifest->has_accounts_lthash ) ) {
+    /* The manifest must contain accounts lthash, irrespective of
+       whether lthash verification is disabled or not.
+       https://github.com/anza-xyz/agave/blob/v3.1.9/runtime/src/serde_snapshot.rs#L482 */
+    FD_LOG_WARNING(( "snapshot manifest missing accounts lthash" ));
+    transition_malformed( ctx, ctx->stem );
+    return;
+  }
+
+  uchar const * sum = manifest->accounts_lthash;
+  uchar hash32[32]; fd_blake3_hash( sum, FD_LTHASH_LEN_BYTES, hash32 );
+  FD_BASE58_ENCODE_32_BYTES( sum,    sum_enc    );
+  FD_BASE58_ENCODE_32_BYTES( hash32, hash32_enc );
+  FD_LOG_INFO(( "snapshot manifest slot=%lu indicates lthash[..32]=%s blake3(lthash)=%s",
+                manifest->slot, sum_enc, hash32_enc ));
+
+  if( FD_UNLIKELY( memcmp( ctx->advertised_hash, hash32, FD_HASH_FOOTPRINT ) ) ) {
+    /* SnapshotError::MismatchedHash
+        https://github.com/anza-xyz/agave/blob/v3.1.8/runtime/src/snapshot_bank_utils.rs#L479 */
+    FD_BASE58_ENCODE_32_BYTES( ctx->advertised_hash, advertised_hash_enc );
+    FD_LOG_WARNING(( "snapshot manifest accounts lthash %s does not match advertised hash from snapshot peer %s",
+                     hash32_enc, advertised_hash_enc ));
+    transition_malformed( ctx, ctx->stem );
+    return;
+  }
+
   ctx->bank_slot = manifest->slot;
+  ctx->manifest_capitalization = manifest->capitalization;
+  if( FD_UNLIKELY( ctx->manifest_capitalization>LONG_MAX ) ) {
+    /* Calculations downstream require capitalization to be treated
+       as long (to handle addition and subtraction). */
+    FD_LOG_WARNING(( "snapshot manifest capitalization %lu exceeds LONG_MAX", ctx->manifest_capitalization ));
+    transition_malformed( ctx, ctx->stem );
+    return;
+  }
+  fd_epoch_schedule_t epoch_schedule = (fd_epoch_schedule_t){
+    .slots_per_epoch             = manifest->epoch_schedule_params.slots_per_epoch,
+    .leader_schedule_slot_offset = manifest->epoch_schedule_params.leader_schedule_slot_offset,
+    .warmup                      = manifest->epoch_schedule_params.warmup,
+    .first_normal_epoch          = manifest->epoch_schedule_params.first_normal_epoch,
+    .first_normal_slot           = manifest->epoch_schedule_params.first_normal_slot,
+  };
+  ctx->epoch = fd_slot_to_epoch( &epoch_schedule, manifest->slot, NULL );
+
+  if( FD_UNLIKELY( verify_bank_hash( ctx, manifest ) ) ) {
+    /* https://github.com/anza-xyz/agave/blob/v3.1.9/runtime/src/bank.rs#L4682 */
+    transition_malformed( ctx, ctx->stem );
+    return;
+  }
+
   if( FD_UNLIKELY( verify_slot_deltas_with_bank_slot( ctx, manifest->slot ) ) ) {
     FD_LOG_WARNING(( "slot deltas verification failed" ));
     transition_malformed( ctx, ctx->stem );
     return;
   }
 
-  if( FD_UNLIKELY( verify_epoch_stakes( ctx, manifest ) ) ) {
+  if( FD_UNLIKELY( verify_epoch_stakes( manifest ) ) ) {
     FD_LOG_WARNING(( "epoch stakes verification failed" ));
     transition_malformed( ctx, ctx->stem );
     return;
@@ -495,28 +612,36 @@ process_manifest( fd_snapin_tile_t * ctx ) {
     return;
   }
 
-  if( manifest->has_accounts_lthash ) {
-    uchar const * sum = manifest->accounts_lthash;
-    uchar hash32[32]; fd_blake3_hash( sum, FD_LTHASH_LEN_BYTES, hash32 );
-    FD_BASE58_ENCODE_32_BYTES( sum,    sum_enc    );
-    FD_BASE58_ENCODE_32_BYTES( hash32, hash32_enc );
-    FD_LOG_INFO(( "snapshot manifest slot=%lu indicates lthash[..32]=%s blake3(lthash)=%s",
-                  manifest->slot, sum_enc, hash32_enc ));
+  if( ctx->full ) {
+    ctx->full_genesis_creation_time_seconds = manifest->creation_time_seconds;
+  } else {
+    if( FD_UNLIKELY( manifest->creation_time_seconds!=ctx->full_genesis_creation_time_seconds ) ) {
+      FD_LOG_WARNING(( "snapshot manifest genesis creation time seconds %lu does not match full snapshot genesis creation time seconds %lu",
+                       manifest->creation_time_seconds, ctx->full_genesis_creation_time_seconds ));
+      transition_malformed( ctx, ctx->stem );
+      return;
+    }
   }
 
   manifest->txncache_fork_id = ctx->txncache_root_fork_id.val;
 
   if( FD_LIKELY( !ctx->lthash_disabled ) ) {
-    if( FD_UNLIKELY( !manifest->has_accounts_lthash ) ) {
-      FD_LOG_WARNING(( "snapshot manifest missing accounts lthash field" ));
-      transition_malformed( ctx, ctx->stem );
-      return;
+    if( FD_LIKELY( ctx->use_vinyl ) ) {
+      fd_ssctrl_hash_result_t * data = fd_chunk_to_laddr( ctx->hash_out.mem, ctx->hash_out.chunk );
+      /* There is padding in this struct, due to alignment, requiring
+         initialization to zero.  This message is infrequent, so the
+         overhead is negligible. */
+      fd_memset( data, 0, sizeof(fd_ssctrl_hash_result_t) );
+      fd_memcpy( &data->lthash, manifest->accounts_lthash, sizeof(fd_lthash_value_t) );
+      data->capitalization = (long)manifest->capitalization;
+      fd_stem_publish( ctx->stem, ctx->out_ct_idx, FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL, ctx->hash_out.chunk, sizeof(fd_ssctrl_hash_result_t), 0UL, 0UL, 0UL );
+      ctx->hash_out.chunk = fd_dcache_compact_next( ctx->hash_out.chunk, sizeof(fd_ssctrl_hash_result_t), ctx->hash_out.chunk0, ctx->hash_out.wmark );
+    } else {
+      fd_lthash_value_t * expected_lthash = fd_chunk_to_laddr( ctx->hash_out.mem, ctx->hash_out.chunk );
+      fd_memcpy( expected_lthash, manifest->accounts_lthash, sizeof(fd_lthash_value_t) );
+      fd_stem_publish( ctx->stem, ctx->out_ct_idx, FD_SNAPSHOT_HASH_MSG_EXPECTED, ctx->hash_out.chunk, sizeof(fd_lthash_value_t), 0UL, 0UL, 0UL );
+      ctx->hash_out.chunk = fd_dcache_compact_next( ctx->hash_out.chunk, sizeof(fd_lthash_value_t), ctx->hash_out.chunk0, ctx->hash_out.wmark );
     }
-
-    fd_lthash_value_t * expected_lthash = fd_chunk_to_laddr( ctx->hash_out.mem, ctx->hash_out.chunk );
-    fd_memcpy( expected_lthash, manifest->accounts_lthash, sizeof(fd_lthash_value_t) );
-    fd_stem_publish( ctx->stem, ctx->out_ct_idx, FD_SNAPSHOT_HASH_MSG_EXPECTED, ctx->hash_out.chunk, sizeof(fd_lthash_value_t), 0UL, 0UL, 0UL );
-    ctx->hash_out.chunk = fd_dcache_compact_next( ctx->hash_out.chunk, sizeof(fd_lthash_value_t), ctx->hash_out.chunk0, ctx->hash_out.wmark );
   }
 
   ulong sig = ctx->full ? fd_ssmsg_sig( FD_SSMSG_MANIFEST_FULL ) :
@@ -532,6 +657,8 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
                   ulong               sz,
                   fd_stem_context_t * stem ) {
   if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_FINISHING ) ) {
+    FD_LOG_WARNING(( "received unexpected data frag while in state %s (%lu)",
+                     fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state  ));
     transition_malformed( ctx, stem );
     return 0;
   }
@@ -541,7 +668,8 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
     return 0;
   }
   if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING ) ) {
-    FD_LOG_ERR(( "invalid state for data frag %d", ctx->state ));
+    FD_LOG_ERR(( "received data frag during invalid state %s (%lu)",
+                 fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
   }
 
   FD_TEST( chunk>=ctx->in.chunk0 && chunk<=ctx->in.wmark && sz<=ctx->in.mtu );
@@ -561,6 +689,7 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
     int res = fd_ssparse_advance( ctx->ssparse, data, sz-ctx->in.pos, result );
     switch( res ) {
       case FD_SSPARSE_ADVANCE_ERROR:
+        FD_LOG_WARNING(( "error while parsing snapshot stream" ));
         transition_malformed( ctx, stem );
         return 0;
       case FD_SSPARSE_ADVANCE_AGAIN:
@@ -572,6 +701,7 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
                                                 result->manifest.acc_vec_map,
                                                 result->manifest.acc_vec_pool );
         if( FD_UNLIKELY( res==FD_SSMANIFEST_PARSER_ADVANCE_ERROR ) ) {
+          FD_LOG_WARNING(( "error while parsing snapshot manifest" ));
           transition_malformed( ctx, stem );
           return 0;
         } else if( FD_LIKELY( res==FD_SSMANIFEST_PARSER_ADVANCE_DONE ) ) {
@@ -589,6 +719,7 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
                                                   bytes_remaining,
                                                   sd_result );
           if( FD_UNLIKELY( res<0 ) ) {
+            FD_LOG_WARNING(( "error while parsing slot deltas in status cache" ));
             transition_malformed( ctx, stem );
             return 0;
           } else if( FD_LIKELY( res==FD_SLOT_DELTA_PARSER_ADVANCE_GROUP ) ) {
@@ -611,24 +742,46 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
       }
       case FD_SSPARSE_ADVANCE_ACCOUNT_HEADER:
         early_exit = fd_snapin_process_account_header( ctx, result );
+
+        if( FD_UNLIKELY( ctx->gui_out.idx!=ULONG_MAX
+                      && !memcmp( result->account_header.owner, fd_solana_config_program_id.key, sizeof(fd_hash_t) )
+                      && result->account_header.data_len
+                      && result->account_header.data_len<=FD_GUI_CONFIG_PARSE_MAX_VALID_ACCT_SZ ) ) {
+          ctx->gui_config_acct_sz  = result->account_header.data_len;
+          ctx->gui_config_acct_off = 0UL;
+        } else {
+          ctx->gui_config_acct_sz  = 0UL;
+        }
         break;
       case FD_SSPARSE_ADVANCE_ACCOUNT_DATA:
         early_exit = fd_snapin_process_account_data( ctx, result );
 
-        /* We exepect ConfigKeys Vec to be length 2.  We expect the size
-           of ConfigProgram-owned accounts to be
-           FD_GUI_CONFIG_PARSE_MAX_VALID_ACCT_SZ, since this the size
-           that the solana CLI allocates for them.  Although the Config
-           program itself does not enforce this limit, the vast majority
-           of accounts (with a tiny number of excpetions on devnet) are
-           maintained with the solana cli. */
-        if( FD_UNLIKELY( ctx->gui_out.idx!=ULONG_MAX && !memcmp( result->account_data.owner, fd_solana_config_program_id.key, sizeof(fd_hash_t) ) && result->account_data.data_sz && *(uchar *)result->account_data.data==2UL && result->account_data.data_sz<=FD_GUI_CONFIG_PARSE_MAX_VALID_ACCT_SZ ) ) {
-          uchar * acct = fd_chunk_to_laddr( ctx->gui_out.mem, ctx->gui_out.chunk );
-          fd_memcpy( acct, result->account_data.data, result->account_data.data_sz );
+        /* Account data may span multiple input chunks (when an account
+           straddles a decompressed chunk boundary), so we copy each
+           piece into the gui_out dcache and only publish once the full
+           account has been received.
 
-          fd_stem_publish( stem, ctx->gui_out.idx, 0UL, ctx->gui_out.chunk, result->account_data.data_sz, 0UL, 0UL, 0UL );
-          ctx->gui_out.chunk = fd_dcache_compact_next( ctx->gui_out.chunk, result->account_data.data_sz, ctx->gui_out.chunk0, ctx->gui_out.wmark );
-          early_exit = 1;
+           We expect ConfigKeys Vec to be length 2 (checked via the
+           first byte of the accumulated data).  We expect the size of
+           ConfigProgram-owned accounts to be at most
+           FD_GUI_CONFIG_PARSE_MAX_VALID_ACCT_SZ, since this is the
+           size that the Solana CLI allocates for them. Although the
+           ConfigProgram itself does not enforce these invariants, the
+           vast majority of accounts (with a tiny number of excpetions
+           on devnet) are maintained with the Solana CLI. */
+        if( FD_UNLIKELY( ctx->gui_config_acct_sz ) ) {
+          uchar * acct = fd_chunk_to_laddr( ctx->gui_out.mem, ctx->gui_out.chunk );
+          fd_memcpy( acct + ctx->gui_config_acct_off, result->account_data.data, result->account_data.data_sz );
+          ctx->gui_config_acct_off += result->account_data.data_sz;
+
+          if( FD_LIKELY( ctx->gui_config_acct_off>=ctx->gui_config_acct_sz ) ) {
+            ctx->gui_config_acct_sz = 0UL;
+            if( FD_LIKELY( acct[ 0 ]==2UL ) ) {
+              fd_stem_publish( stem, ctx->gui_out.idx, 0UL, ctx->gui_out.chunk, ctx->gui_config_acct_off, 0UL, 0UL, 0UL );
+              ctx->gui_out.chunk = fd_dcache_compact_next( ctx->gui_out.chunk, ctx->gui_config_acct_off, ctx->gui_out.chunk0, ctx->gui_out.wmark );
+              early_exit = 1;
+            }
+          }
         }
         break;
       case FD_SSPARSE_ADVANCE_ACCOUNT_BATCH:
@@ -644,6 +797,7 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
 
     if( FD_UNLIKELY( !ctx->flags.manifest_processed && ctx->flags.manifest_done && ctx->flags.status_cache_done ) ) {
       process_manifest( ctx );
+      if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_ERROR ) ) break;
       ctx->flags.manifest_processed = 1;
     }
 
@@ -657,6 +811,23 @@ handle_data_frag( fd_snapin_tile_t *  ctx,
   int reprocess_frag = ctx->in.pos<sz;
   if( FD_LIKELY( !reprocess_frag ) ) ctx->in.pos = 0UL;
   return reprocess_frag;
+}
+
+static int
+validate_capitalization( fd_snapin_tile_t * ctx ) {
+  /* Capitalization is checked only when lthash verification is
+     enabled, since a snapshot that fails lthash would most probably
+     fail capitalization as well.  This also matches the snapshot
+     load pipeline check under vinyl. */
+  if( FD_UNLIKELY( ctx->lthash_disabled ) ) return 0;
+  if( FD_UNLIKELY( ctx->capitalization!=ctx->manifest_capitalization ) ) {
+    /* SnapshotError::MismatchedCapitalization
+        https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/runtime/src/snapshot_bank_utils.rs#L217 */
+    FD_LOG_WARNING(( "%s snapshot manifest capitalization %lu does not match computed capitalization %lu",
+                     ctx->full?"full":"incr", ctx->manifest_capitalization, ctx->capitalization ));
+    return -1;
+  }
+  return 0;
 }
 
 static void
@@ -681,8 +852,10 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
       ctx->state = FD_SNAPSHOT_STATE_PROCESSING;
       fd_ssparse_batch_enable( ctx->ssparse, ctx->use_vinyl || sig==FD_SNAPSHOT_MSG_CTRL_INIT_FULL );
       ctx->full = sig==FD_SNAPSHOT_MSG_CTRL_INIT_FULL;
-      ctx->txncache_entries_len  = 0UL;
-      ctx->blockhash_offsets_len = 0UL;
+      ctx->in.pos                  = 0UL;
+      ctx->txncache_entries_len    = 0UL;
+      ctx->blockhash_offsets_len   = 0UL;
+      ctx->manifest_capitalization = 0UL;
       fd_txncache_reset( ctx->txncache );
       fd_ssparse_reset( ctx->ssparse );
       fd_ssmanifest_parser_init( ctx->manifest_parser, fd_chunk_to_laddr( ctx->manifest_out.mem, ctx->manifest_out.chunk ) );
@@ -697,6 +870,10 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
         ctx->metrics.accounts_ignored  = ctx->metrics.full_accounts_ignored  = 0;
         ctx->metrics.full_bytes_read   = 0UL;
         ctx->metrics.incremental_bytes_read = 0UL;
+        ctx->full_genesis_creation_time_seconds = 0UL;
+        ctx->capitalization                     = 0UL;
+        ctx->dup_capitalization                 = 0UL;
+        ctx->recovery.capitalization            = 0UL;
       } else {
         ctx->metrics.accounts_loaded   = ctx->metrics.full_accounts_loaded;
         ctx->metrics.accounts_replaced = ctx->metrics.full_accounts_replaced;
@@ -706,6 +883,9 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
         fd_funk_txn_xid_t incremental_xid = { .ul={ LONG_MAX, LONG_MAX } };
         fd_accdb_attach_child( ctx->accdb_admin, ctx->xid, &incremental_xid );
         fd_funk_txn_xid_copy( ctx->xid, &incremental_xid );
+
+        ctx->capitalization     = ctx->recovery.capitalization;
+        ctx->dup_capitalization = 0UL;
       }
 
       /* Save the slot advertised by the snapshot peer and verify it
@@ -715,6 +895,7 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
          separate fd_ssctrl_meta_t message below. */
       fd_ssctrl_init_t const * msg = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
       ctx->advertised_slot = msg->slot;
+      fd_memcpy( ctx->advertised_hash, msg->snapshot_hash, FD_HASH_FOOTPRINT );
       break;
     }
 
@@ -738,6 +919,15 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
           forward_msg = 0;
           break;
         }
+
+        ctx->capitalization = fd_ulong_sat_sub( ctx->capitalization, ctx->dup_capitalization );
+        if( FD_UNLIKELY( validate_capitalization( ctx )!=0 ) ) {
+          transition_malformed( ctx, stem );
+          forward_msg = 0;
+          break;
+        }
+
+        ctx->recovery.capitalization = ctx->capitalization;
       }
 
       /* Backup metric counters */
@@ -755,6 +945,13 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
         if( FD_UNLIKELY( verify_slot_deltas_with_slot_history( ctx ) ) ) {
           if( ctx->full ) FD_LOG_WARNING(( "slot deltas verification failed for full snapshot" ));
           else            FD_LOG_WARNING(( "slot deltas verification failed for incremental snapshot" ));
+          transition_malformed( ctx, stem );
+          forward_msg = 0;
+          break;
+        }
+
+        ctx->capitalization = fd_ulong_sat_sub( ctx->capitalization, ctx->dup_capitalization );
+        if( FD_UNLIKELY( validate_capitalization( ctx )!=0 ) ) {
           transition_malformed( ctx, stem );
           forward_msg = 0;
           break;
@@ -814,7 +1011,9 @@ handle_control_frag( fd_snapin_tile_t *  ctx,
     }
 
     default: {
-      FD_LOG_ERR(( "unexpected control sig %lu", sig ));
+      FD_LOG_ERR(( "unexpected control frag %s (%lu) in state %s (%lu)",
+                   fd_ssctrl_msg_ctrl_str( sig ), sig,
+                   fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
       break;
     }
   }
@@ -851,7 +1050,7 @@ populate_allowed_fds( fd_topo_t      const * topo FD_PARAM_UNUSED,
                       fd_topo_tile_t const * tile FD_PARAM_UNUSED,
                       ulong                  out_fds_cnt,
                       int *                  out_fds ) {
-  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "out_fds_cnt %lu", out_fds_cnt ));
+  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "invalid out_fds_cnt %lu", out_fds_cnt ));
 
   ulong out_cnt = 0;
   out_fds[ out_cnt++ ] = 2UL; /* stderr */
@@ -926,6 +1125,7 @@ unprivileged_init( fd_topo_t *      topo,
     ulong depth = out_link_txn->depth;
     FD_TEST( ( depth*snapin_txn.mtu )==( sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES ) );
     ctx->txncache_entries                 = fd_chunk_to_laddr( snapin_txn.mem, snapin_txn.chunk0 );
+    FD_TEST( fd_dcache_app_sz( out_link_txn->dcache )>=sizeof(ulong) );
     ctx->txncache_entries_len_vinyl_ptr   = (ulong*)fd_dcache_app_laddr( out_link_txn->dcache );
     memset( ctx->txncache_entries_len_vinyl_ptr, 0, sizeof(ulong) );
   } else {
@@ -986,6 +1186,7 @@ unprivileged_init( fd_topo_t *      topo,
   if( ( 0==strcmp( snapin_out_link->name, "snapin_ls" ) ) ||
       ( 0==strcmp( snapin_out_link->name, "snapin_wm" ) ) ) {
     ctx->hash_out = out1( topo, tile, snapin_out_link->name );
+    FD_TEST( ctx->hash_out.idx==out_link_ct_idx );
   }
 
   fd_ssparse_reset( ctx->ssparse );
@@ -1001,11 +1202,21 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->in.mtu                    = in_link->mtu;
   ctx->in.pos                    = 0UL;
 
+  ctx->gui_config_acct_sz  = 0UL;
+  ctx->gui_config_acct_off = 0UL;
+
   ctx->buffered_batch.batch_cnt     = 0UL;
   ctx->buffered_batch.remaining_idx = 0UL;
 
   ctx->advertised_slot = 0UL;
   ctx->bank_slot       = 0UL;
+  ctx->epoch           = 0UL;
+
+  ctx->full_genesis_creation_time_seconds = 0UL;
+  ctx->manifest_capitalization            = 0UL;
+  ctx->capitalization                     = 0UL;
+  ctx->dup_capitalization                 = 0UL;
+  ctx->recovery.capitalization            = 0UL;
 
   fd_memset( &ctx->flags, 0, sizeof(ctx->flags) );
 
@@ -1014,10 +1225,19 @@ unprivileged_init( fd_topo_t *      topo,
   }
 }
 
-/* Control fragments can result in one extra publish to forward the
-   message down the pipeline, in addition to the result / malformed
-   message. Can send one duplicate account message as well. */
-#define STEM_BURST 3UL
+/* There are 3 output links that affect the calculation of STEM_BURST:
+    1. topology-dependent link:
+    | 1a. snapin_ct (no lthash verification)
+    | 1b. snapin_ls (with lthash verification, funk)
+    | 1c. snapin_wm (with lthash verification, vinyl)
+    | - worst case: 2 messages, e.g. process_manifest (lthash) +
+    |            FD_SSPARSE_ADVANCE_ACCOUNT_{HEADER,DATA,BATCH,ERROR}
+    2. snapin_manif - worst case: 1 message
+    3. snapin_gui   - worst case: 1 message (config program account)
+   The STEM_BURST is the max value across these 3 links (not the sum).
+   Note that snapin_txn is excluded from this calculation, since it is
+   an unreliable link, working as a dcache place holder. */
+#define STEM_BURST 2UL
 
 #define STEM_LAZY  1000L
 

@@ -19,9 +19,9 @@ extern fd_topo_obj_callbacks_t fd_obj_cb_store;
 extern fd_topo_obj_callbacks_t fd_obj_cb_fec_sets;
 extern fd_topo_obj_callbacks_t fd_obj_cb_txncache;
 extern fd_topo_obj_callbacks_t fd_obj_cb_banks;
-extern fd_topo_obj_callbacks_t fd_obj_cb_banks_locks;
 extern fd_topo_obj_callbacks_t fd_obj_cb_funk;
 extern fd_topo_obj_callbacks_t fd_obj_cb_funk_locks;
+extern fd_topo_obj_callbacks_t fd_obj_cb_progcache;
 extern fd_topo_obj_callbacks_t fd_obj_cb_acc_pool;
 extern fd_topo_obj_callbacks_t fd_obj_cb_rnonce_ss;
 
@@ -47,9 +47,9 @@ fd_topo_obj_callbacks_t * CALLBACKS[] = {
   &fd_obj_cb_fec_sets,
   &fd_obj_cb_txncache,
   &fd_obj_cb_banks,
-  &fd_obj_cb_banks_locks,
   &fd_obj_cb_funk,
   &fd_obj_cb_funk_locks,
+  &fd_obj_cb_progcache,
   &fd_obj_cb_acc_pool,
   &fd_obj_cb_vinyl_meta,
   &fd_obj_cb_vinyl_meta_ele,
@@ -244,7 +244,6 @@ add_bench_topo( fd_topo_t  * topo,
                 uint         send_to_ip_addr,
                 ushort       rpc_port,
                 uint         rpc_ip_addr,
-                int          no_quic,
                 int          reserve_agave_cores ) {
   (void)topo;
   (void)affinity;
@@ -259,6 +258,5 @@ add_bench_topo( fd_topo_t  * topo,
   (void)send_to_ip_addr;
   (void)rpc_port;
   (void)rpc_ip_addr;
-  (void)no_quic;
   (void)reserve_agave_cores;
 }

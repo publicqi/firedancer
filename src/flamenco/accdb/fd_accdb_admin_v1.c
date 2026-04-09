@@ -1,6 +1,8 @@
 #include "fd_accdb_admin_v1.h"
 #include "../fd_flamenco_base.h"
 
+int fd_accdb_log_enabled = 1;
+
 FD_STATIC_ASSERT( alignof(fd_accdb_admin_v1_t)<=alignof(fd_accdb_admin_t), layout );
 FD_STATIC_ASSERT( sizeof (fd_accdb_admin_v1_t)<=sizeof(fd_accdb_admin_t),  layout );
 
@@ -64,16 +66,18 @@ fd_accdb_v1_attach_child( fd_accdb_admin_t *        db_,
                           fd_funk_txn_xid_t const * xid_parent,
                           fd_funk_txn_xid_t const * xid_new ) {
   fd_accdb_admin_v1_t * db = downcast( db_ );
-  FD_LOG_INFO(( "accdb txn xid %lu:%lu: created with parent %lu:%lu",
-                xid_new   ->ul[0], xid_new   ->ul[1],
-                xid_parent->ul[0], xid_parent->ul[1] ));
+  if( FD_LIKELY( fd_accdb_log_enabled ) )
+    FD_LOG_INFO(( "accdb txn xid %lu:%lu: created with parent %lu:%lu",
+                  xid_new   ->ul[0], xid_new   ->ul[1],
+                  xid_parent->ul[0], xid_parent->ul[1] ));
   fd_funk_txn_prepare( db->funk, xid_parent, xid_new );
 }
 
 static void
 fd_accdb_txn_cancel_one( fd_accdb_admin_v1_t * admin,
                          fd_funk_txn_t *       txn ) {
-  FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: cancel", (void *)txn, txn->xid.ul[0], txn->xid.ul[1] ));
+  if( FD_LIKELY( fd_accdb_log_enabled ) )
+    FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: cancel", (void *)txn, txn->xid.ul[0], txn->xid.ul[1] ));
 
   if( FD_UNLIKELY( txn->state!=FD_FUNK_TXN_STATE_ACTIVE ) ) {
     FD_LOG_CRIT(( "cannot cancel xid %lu:%lu: unxpected state %u-%s",
@@ -139,8 +143,9 @@ fd_accdb_txn_cancel_one( fd_accdb_admin_v1_t * admin,
     rec_cnt++;
   }
   admin->base.revert_cnt += rec_cnt;
-  FD_LOG_INFO(( "accdb freed %lu records while cancelling txn %lu:%lu",
-                rec_cnt, txn->xid.ul[0], txn->xid.ul[1] ));
+  if( FD_LIKELY( fd_accdb_log_enabled ) )
+    FD_LOG_INFO(( "accdb freed %lu records while cancelling txn %lu:%lu",
+                  rec_cnt, txn->xid.ul[0], txn->xid.ul[1] ));
 
   /* Phase 4: Remove transaction from fork graph */
 
@@ -162,7 +167,7 @@ fd_accdb_txn_cancel_one( fd_accdb_admin_v1_t * admin,
     if( funk->shmem->child_tail_cidx==self_cidx ) funk->shmem->child_tail_cidx = prev_cidx;
   }
 
-  /* Phase 5: Remove transcation from index */
+  /* Phase 5: Remove transaction from index */
 
   fd_funk_txn_map_query_t query[1];
   int remove_err = fd_funk_txn_map_remove( funk->txn_map, &txn->xid, NULL, query, FD_MAP_FLAG_BLOCKING );
@@ -371,7 +376,8 @@ fd_accdb_txn_publish_one( fd_accdb_admin_v1_t * accdb,
     FD_LOG_CRIT(( "fd_accdb_publish failed: txn with xid %lu:%lu is not a child of the last published txn", xid->ul[0], xid->ul[1] ));
   }
   fd_funk_txn_xid_st_atomic( funk->shmem->last_publish, xid );
-  FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: publish", (void *)txn, txn->xid.ul[0], txn->xid.ul[1] ));
+  if( FD_LIKELY( fd_accdb_log_enabled ) )
+    FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: publish", (void *)txn, txn->xid.ul[0], txn->xid.ul[1] ));
 
   /* Phase 2: Drain users from transaction */
 
@@ -441,9 +447,10 @@ fd_accdb_v1_advance_root( fd_accdb_admin_t *        accdb_,
     FD_LOG_CRIT(( "fd_accdb_txn_advance_root: parent of txn %lu:%lu is not root", xid->ul[0], xid->ul[1] ));
   }
 
-  FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: advancing root",
-                (void *)txn,
-                xid->ul[0], xid->ul[1] ));
+  if( FD_LIKELY( fd_accdb_log_enabled ) )
+    FD_LOG_INFO(( "accdb txn laddr=%p xid %lu:%lu: advancing root",
+                  (void *)txn,
+                  xid->ul[0], xid->ul[1] ));
 
   fd_accdb_txn_cancel_siblings( accdb, txn );
 
@@ -524,8 +531,6 @@ clear_txn_list( fd_funk_t * funk,
     if( FD_UNLIKELY( free_err!=FD_POOL_SUCCESS ) ) FD_LOG_CRIT(( "fd_funk_txn_pool_release failed (%i)", free_err ));
     idx = next_idx;
   }
-  funk->shmem->child_head_cidx = UINT_MAX;
-  funk->shmem->child_tail_cidx = UINT_MAX;
 }
 
 void
@@ -533,6 +538,8 @@ fd_accdb_v1_clear( fd_accdb_admin_t * accdb_ ) {
   fd_accdb_admin_v1_t * accdb = downcast( accdb_ );
   fd_funk_t *           funk  = accdb->funk;
   clear_txn_list( funk, fd_funk_txn_idx( funk->shmem->child_head_cidx ) );
+  funk->shmem->child_head_cidx = UINT_MAX;
+  funk->shmem->child_tail_cidx = UINT_MAX;
   reset_rec_map( funk );
 }
 

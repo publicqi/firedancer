@@ -5,7 +5,7 @@
 #include "../../disco/topo/fd_topo.h"
 #include "../../discof/fd_accdb_topo.h"
 #include "../../ballet/sha256/fd_sha256.h"
-#include "../../flamenco/runtime/fd_genesis_parse.h"
+#include "../../flamenco/genesis/fd_genesis_parse.h"
 #include "../../flamenco/accdb/fd_accdb_admin_v1.h"
 #include "../../flamenco/accdb/fd_accdb_admin_v2.h"
 #include "../../flamenco/accdb/fd_accdb_sync.h"
@@ -213,7 +213,7 @@ after_credit( fd_genesi_tile_t *  ctx,
 
     fd_genesis_meta_t * dst = fd_chunk_to_laddr( ctx->out.mem, ctx->out.chunk0 );
     memset( dst, 0, sizeof(fd_genesis_meta_t) );
-    dst->creation_time_millis = ctx->genesis->creation_time;
+    dst->creation_time_seconds = ctx->genesis->creation_time;
     dst->genesis_hash = *ctx->genesis_hash;
 
     if( FD_UNLIKELY( ctx->bootstrap ) ) {
@@ -311,7 +311,7 @@ after_credit( fd_genesi_tile_t *  ctx,
 
     fd_genesis_meta_t * dst = fd_chunk_to_laddr( ctx->out.mem, ctx->out.chunk0 );
     memset( dst, 0, sizeof(fd_genesis_meta_t) );
-    dst->creation_time_millis = genesis->creation_time;
+    dst->creation_time_seconds = genesis->creation_time;
     dst->genesis_hash = *hash;
 
     uchar * dst_blob = (uchar *)( dst+1 );

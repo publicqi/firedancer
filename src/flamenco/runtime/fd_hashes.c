@@ -35,7 +35,7 @@ fd_hashes_account_lthash_simple( uchar const         pubkey[ static FD_HASH_FOOT
     return;
   }
 
-  uchar executable_flag = executable & 0x1;
+  uchar executable_flag = !!executable;
 
   fd_blake3_t b3[1];
   fd_blake3_init( b3 );
@@ -94,7 +94,7 @@ fd_hashes_update_lthash1( fd_lthash_value_t *       lthash_post, /* out */
   fd_bank_lthash_end_locking_modify( bank );
 
   if( capture_ctx && capture_ctx->capture_solcap &&
-      fd_bank_slot_get( bank )>=capture_ctx->solcap_start_slot ) {
+      bank->f.slot>=capture_ctx->solcap_start_slot ) {
     fd_solana_account_meta_t solana_meta[1];
     fd_solana_account_meta_init(
         solana_meta,
@@ -107,8 +107,32 @@ fd_hashes_update_lthash1( fd_lthash_value_t *       lthash_post, /* out */
       capture_ctx->current_txn_idx,
       pubkey,
       solana_meta,
-      fd_bank_slot_get( bank ),
+      bank->f.slot,
       fd_account_data( meta ),
       meta->dlen );
   }
+}
+
+void
+fd_hashes_apply_hard_forks( fd_hash_t *   hash,
+                            ulong         slot,
+                            ulong         parent_slot,
+                            ulong const * hard_forks,
+                            ulong const * hard_forks_cnts,
+                            ulong         hard_forks_cnt ) {
+  ulong sum = 0UL;
+  for( ulong i=0UL; i<hard_forks_cnt; i++ ) {
+    if( FD_UNLIKELY( parent_slot<hard_forks[ i ] && hard_forks[ i ]<=slot ) ) sum += hard_forks_cnts[ i ];
+  }
+
+  if( FD_UNLIKELY( !sum ) ) return;
+
+  ulong sum_le[ 1 ];
+  FD_STORE( ulong, sum_le, sum );
+
+  fd_sha256_t sha;
+  fd_sha256_init( &sha );
+  fd_sha256_append( &sha, hash->hash, sizeof(fd_hash_t) );
+  fd_sha256_append( &sha, sum_le,     sizeof(ulong)     );
+  fd_sha256_fini( &sha, hash->hash );
 }

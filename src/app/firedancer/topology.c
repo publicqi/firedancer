@@ -10,6 +10,7 @@
 #include "../../discof/repair/fd_repair.h"
 #include "../../discof/reasm/fd_reasm.h"
 #include "../../discof/replay/fd_replay_tile.h"
+#include "../../disco/shred/fd_shred_tile.h"
 #include "../../disco/net/fd_net_tile.h"
 #include "../../discof/restore/fd_snapct_tile.h"
 #include "../../disco/gui/fd_gui_config_parse.h"
@@ -29,6 +30,7 @@
 #include "../../discof/restore/utils/fd_ssctrl.h"
 #include "../../discof/restore/utils/fd_ssmsg.h"
 #include "../../flamenco/capture/fd_solcap_writer.h"
+#include "../../funk/fd_funk.h"
 #include "../../flamenco/progcache/fd_progcache_admin.h"
 #include "../../flamenco/runtime/fd_acc_pool.h"
 #include "../../flamenco/accdb/fd_accdb_lineage.h"
@@ -77,13 +79,6 @@ setup_topo_banks( fd_topo_t *  topo,
   return obj;
 }
 
-fd_topo_obj_t *
-setup_topo_banks_locks( fd_topo_t *  topo,
-                        char const * wksp_name ) {
-  fd_topo_obj_t * obj = fd_topob_obj( topo, "banks_locks", wksp_name );
-  return obj;
-}
-
 static fd_topo_obj_t *
 setup_topo_fec_sets( fd_topo_t * topo, char const * wksp_name, ulong sz ) {
   fd_topo_obj_t * obj = fd_topob_obj( topo, "fec_sets", wksp_name );
@@ -104,13 +99,13 @@ setup_topo_funk( fd_topo_t *  topo,
   ulong funk_footprint = fd_funk_shmem_footprint( max_database_transactions, max_account_records );
   if( FD_UNLIKELY( !funk_footprint ) ) FD_LOG_ERR(( "Invalid [accounts] parameters" ));
 
-  /* Increase workspace partition count */
+  /* Adjust workspace partition count */
   ulong wksp_idx = fd_topo_find_wksp( topo, "funk" );
   FD_TEST( wksp_idx!=ULONG_MAX );
   fd_topo_wksp_t * wksp = &topo->workspaces[ wksp_idx ];
   ulong size     = funk_footprint+(heap_size_gib*(1UL<<30));
-  ulong part_max = fd_wksp_part_max_est( size, 1U<<14U );
-  if( FD_UNLIKELY( !part_max ) ) FD_LOG_ERR(( "fd_wksp_part_max_est(%lu,16KiB) failed", size ));
+  ulong part_max = fd_wksp_part_max_est( size, 1U<<18U );
+  if( FD_UNLIKELY( !part_max ) ) FD_LOG_ERR(( "fd_wksp_part_max_est(%lu,256KiB) failed", size ));
   wksp->part_max += part_max;
 
   fd_topo_obj_t * locks_obj = fd_topob_obj( topo, "funk_locks", "funk_locks" );
@@ -125,40 +120,37 @@ setup_topo_progcache( fd_topo_t *  topo,
                       ulong        max_cache_entries,
                       ulong        max_database_transactions,
                       ulong        heap_size ) {
-  fd_topo_obj_t * obj = fd_topob_obj( topo, "funk", wksp_name );
+  fd_topo_obj_t * obj = fd_topob_obj( topo, "progcache", wksp_name );
   FD_TEST( fd_pod_insert_ulong(  topo->props, "progcache", obj->id ) );
   FD_TEST( fd_pod_insertf_ulong( topo->props, max_cache_entries,         "obj.%lu.rec_max",  obj->id ) );
   FD_TEST( fd_pod_insertf_ulong( topo->props, max_database_transactions, "obj.%lu.txn_max",  obj->id ) );
   FD_TEST( fd_pod_insertf_ulong( topo->props, heap_size,                 "obj.%lu.heap_max", obj->id ) );
-  ulong funk_footprint = fd_funk_shmem_footprint( max_database_transactions, max_cache_entries );
-  if( FD_UNLIKELY( !funk_footprint ) ) FD_LOG_ERR(( "Invalid [runtime.program_cache] parameters" ));
-  if( FD_UNLIKELY( heap_size<(2*funk_footprint) ) ) {
+  ulong pcache_footprint = fd_progcache_shmem_footprint( max_database_transactions, max_cache_entries );
+  if( FD_UNLIKELY( !pcache_footprint ) ) FD_LOG_ERR(( "Invalid [runtime.program_cache] parameters" ));
+  if( FD_UNLIKELY( heap_size<(2*pcache_footprint) ) ) {
     FD_LOG_ERR(( "Invalid [runtime.program_cache] parameters: heap_size_mib should be at least %lu",
-                 ( 2*funk_footprint )>>20 ));
+                 ( 2*pcache_footprint )>>20 ));
   }
 
-  /* Increase workspace partition count */
+  /* Adjust workspace partition count */
   ulong wksp_idx = fd_topo_find_wksp( topo, wksp_name );
   FD_TEST( wksp_idx!=ULONG_MAX );
   fd_topo_wksp_t * wksp = &topo->workspaces[ wksp_idx ];
-  ulong part_max = fd_wksp_part_max_est( heap_size, 1U<<14U );
-  if( FD_UNLIKELY( !part_max ) ) FD_LOG_ERR(( "fd_wksp_part_max_est(%lu,16KiB) failed", funk_footprint ));
+  ulong part_max = fd_wksp_part_max_est( heap_size, 1U<<18U );
+  if( FD_UNLIKELY( !part_max ) ) FD_LOG_ERR(( "fd_wksp_part_max_est(%lu,256KiB) failed", heap_size ));
   wksp->part_max += part_max;
-
-  fd_topo_obj_t * locks_obj = fd_topob_obj( topo, "funk_locks", wksp_name );
-  FD_TEST( fd_pod_insert_ulong ( topo->props, "progcache_locks", locks_obj->id ) );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, max_database_transactions, "obj.%lu.txn_max", locks_obj->id ) );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, max_cache_entries,         "obj.%lu.rec_max", locks_obj->id ) );
 }
 
 fd_topo_obj_t *
 setup_topo_store( fd_topo_t *  topo,
                   char const * wksp_name,
                   ulong        fec_max,
-                  uint         part_cnt ) {
+                  uint         part_cnt,
+                  ulong        fec_data_max ) {
   fd_topo_obj_t * obj = fd_topob_obj( topo, "store", wksp_name );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, fec_max,  "obj.%lu.fec_max",  obj->id ) );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, part_cnt, "obj.%lu.part_cnt", obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, fec_max,      "obj.%lu.fec_max",      obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, part_cnt,     "obj.%lu.part_cnt",     obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, fec_data_max, "obj.%lu.fec_data_max", obj->id ) );
   return obj;
 }
 
@@ -177,12 +169,12 @@ setup_topo_txncache( fd_topo_t *  topo,
 
 fd_topo_obj_t *
 setup_topo_acc_pool( fd_topo_t * topo,
-                     ulong       max_account_cnt ) {
+                     ulong       concurrent_account_limit ) {
   fd_topob_wksp( topo, "acc_pool" );
   fd_topo_obj_t * acc_pool_obj = fd_topob_obj( topo, "acc_pool", "acc_pool" );
   FD_TEST( acc_pool_obj );
   FD_TEST( acc_pool_obj->id != ULONG_MAX );
-  fd_pod_insertf_ulong( topo->props, max_account_cnt, "obj.%lu.max_account_cnt", acc_pool_obj->id );
+  fd_pod_insertf_ulong( topo->props, concurrent_account_limit, "obj.%lu.concurrent_account_limit", acc_pool_obj->id );
   return acc_pool_obj;
 }
 
@@ -480,7 +472,6 @@ fd_topo_initialize( config_t * config ) {
   fd_topob_wksp( topo, "fec_sets"      );
   fd_topob_wksp( topo, "txncache"      );
   fd_topob_wksp( topo, "banks"         );
-  fd_topob_wksp( topo, "banks_locks"   );
   fd_topob_wksp( topo, "store"         )->core_dump_level = FD_TOPO_CORE_DUMP_LEVEL_FULL;
   fd_topob_wksp( topo, "rnonce"        );
 
@@ -578,8 +569,9 @@ fd_topo_initialize( config_t * config ) {
        guarantee enough mcache credits.  The mtu needs to be adjusted
        so that the total dcache size matches what snapin requires.
        Round up the mtu (ulong) size using: (...+(depth-1))/depth. */
-      /**/             fd_topob_link( topo, "snapin_txn",    "snapin_txn",    16UL,                                     (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
-      /**/             fd_topob_link( topo, "snapin_wm",     "snapin_wm",     16UL,                                     FD_SNAPWM_PAIR_BATCH_SZ_MAX,   1UL );
+      fd_topo_link_t * snapin_txn = fd_topob_link( topo, "snapin_txn",    "snapin_txn",    16UL,                        (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
+      /**/                          fd_topob_link( topo, "snapin_wm",     "snapin_wm",     16UL,                        FD_SNAPWM_PAIR_BATCH_SZ_MAX,   1UL );
+      fd_pod_insertf_ulong( topo->props, sizeof(ulong), "obj.%lu.app_sz", snapin_txn->dcache_obj_id );
       /* snapwh and snapwr both use snapwm_wh's dcache.  snapwh sends
          control messages to snapwr, using snapwh_wr link, instructing
          which chunks in the dcache are ready to be consumed by snapwr. */
@@ -596,8 +588,8 @@ fd_topo_initialize( config_t * config ) {
       }
     } else {
       if( vinyl_enabled ) {
-        FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",  128UL,                                    sizeof(fd_lthash_value_t),     1UL );
-        /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL,                                  FD_SNAPWM_DUP_META_BATCH_SZ,   1UL );
+        FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",  128UL,                                    sizeof(fd_ssctrl_hash_result_t),     1UL );
+        /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL,                                  FD_SNAPWM_DUP_META_BATCH_SZ,   1UL+sizeof(fd_ssctrl_hash_result_t)/FD_SNAPWM_DUP_META_BATCH_SZ ); /* snapwm forwards 1 fd_ssctrl_hash_result_t message (hash and capitalization) per snapshot load */
         /**/                 fd_topob_link( topo, "snaplv_lh",  "snaplv_lh",  262144UL,                                 FD_SNAPLV_DUP_META_SZ,         FD_SNAPLV_STEM_BURST ); /* FD_SNAPWM_DUP_META_BATCH_CNT_MAX times the depth of snapwm_lv */
         /**/                 fd_topob_link( topo, "snaplv_ct",  "snaplv_ct",  128UL,                                    0UL,                           1UL );
       } else {
@@ -649,8 +641,8 @@ fd_topo_initialize( config_t * config ) {
   /**/                 fd_topob_link( topo, "txsend_sign",   "txsend_sign",   128UL,                                    FD_TXN_MTU,                    1UL ); /* TODO: Depth probably doesn't need to be 128 */
   /**/                 fd_topob_link( topo, "sign_txsend",   "sign_txsend",   128UL,                                    sizeof(fd_ed25519_sig_t)*2UL,  1UL ); /* TODO: Depth probably doesn't need to be 128 */
 
-  FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_out",     "shred_out",     shred_depth,                              FD_SHRED_OUT_MTU,              3UL ); /* TODO: Pretty sure burst of 3 is incorrect here */
-  /**/                 fd_topob_link( topo, "repair_out",    "repair_out",    shred_depth,                              FD_SHRED_OUT_MTU,              1UL );
+  FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_out",     "shred_out",     shred_depth,                              sizeof(fd_shred_message_t),    3UL ); /* TODO: Pretty sure burst of 3 is incorrect here */
+  /**/                 fd_topob_link( topo, "repair_out",    "repair_out",    shred_depth,                              sizeof(fd_fec_complete_t),   1UL );
   /**/                 fd_topob_link( topo, "tower_out",     "tower_out",     16384UL,                                  sizeof(fd_tower_msg_t),        2UL ); /* conf + slot_done. see explanation in fd_tower_tile.h for link_depth */
   /**/                 fd_topob_link( topo, "txsend_out",    "txsend_out",    128UL,                                    FD_TPU_RAW_MTU,                1UL );
 
@@ -856,7 +848,7 @@ fd_topo_initialize( config_t * config ) {
       /**/            fd_topob_tile_out(    topo, "snapin",  0UL,                       "snapin_wm",     0UL                                                );
       /**/            fd_topob_tile_in (    topo, "snapwm",  0UL,          "metric_in", "snapin_wm",     0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
       /**/            fd_topob_tile_out(    topo, "snapin",  0UL,                       "snapin_txn",    0UL                                                );
-      /**/            fd_topob_tile_in (    topo, "snapwm",  0UL,          "metric_in", "snapin_txn",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
+      /**/            fd_topob_tile_in (    topo, "snapwm",  0UL,          "metric_in", "snapin_txn",    0UL,          FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
       /**/            fd_topob_tile_out(    topo, "snapwm",  0UL,                       "snapwm_wh",     0UL                                                );
       /**/            fd_topob_tile_in (    topo, "snapwh",  0UL,          "metric_in", "snapwm_wh",     0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
       /**/            fd_topob_tile_out(    topo, "snapwh",  0UL,                       "snapwh_wr",     0UL                                                );
@@ -1091,7 +1083,7 @@ fd_topo_initialize( config_t * config ) {
   }
 
   FOR(sign_tile_cnt-1UL) fd_topob_tile_out( topo, "repair",  0UL,                       "repair_sign",  i                                                    );
-  FOR(sign_tile_cnt-1UL) fd_topob_tile_in ( topo, "sign",    i+1UL,        "metric_in", "repair_sign",  i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
+  FOR(sign_tile_cnt-1UL) fd_topob_tile_in ( topo, "sign",    i+1UL,        "metric_in", "repair_sign",  i,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
   FOR(sign_tile_cnt-1UL) fd_topob_tile_out( topo, "sign",    i+1UL,                     "sign_repair",  i                                                    );
   FOR(sign_tile_cnt-1UL) fd_topob_tile_in ( topo, "repair",  0UL,          "metric_in", "sign_repair",  i,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   ); /* This link is polled because the signing requests are asynchronous */
 
@@ -1250,21 +1242,13 @@ fd_topo_initialize( config_t * config ) {
   FOR(resolv_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "resolv", i   ) ], banks_obj, FD_SHMEM_JOIN_MODE_READ_ONLY  );
   FD_TEST( fd_pod_insertf_ulong( topo->props, banks_obj->id, "banks" ) );
 
-  fd_topo_obj_t * banks_locks_obj = setup_topo_banks_locks( topo, "banks_locks" );
-  /**/                 fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "replay", 0UL ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  /**/                 fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "tower",  0UL ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i   ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(execle_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execle", i   ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(resolv_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "resolv", i   ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, banks_locks_obj->id, "banks_locks" ) );
-
   if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
-    if( FD_UNLIKELY( config->firedancer.runtime.max_account_cnt<FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_BUNDLE ) ) {
-      FD_LOG_ERR(( "max_account_cnt is less than the minimum required for bundle execution: %lu < %lu", config->firedancer.runtime.max_account_cnt, FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_BUNDLE ));
+    if( FD_UNLIKELY( config->firedancer.runtime.concurrent_account_limit<FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_BUNDLE ) ) {
+      FD_LOG_ERR(( "concurrent_account_limit is less than the minimum required for bundle execution: %lu < %lu", config->firedancer.runtime.concurrent_account_limit, FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_BUNDLE ));
     }
   }
-  if( FD_UNLIKELY( config->firedancer.runtime.max_account_cnt<FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_TX ) ) {
-    FD_LOG_ERR(( "max_account_cnt is less than the minimum required for transaction execution: %lu < %lu", config->firedancer.runtime.max_account_cnt, FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_TX ));
+  if( FD_UNLIKELY( config->firedancer.runtime.concurrent_account_limit<FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_TX ) ) {
+    FD_LOG_ERR(( "concurrent_account_limit is less than the minimum required for transaction execution: %lu < %lu", config->firedancer.runtime.concurrent_account_limit, FD_ACC_POOL_MIN_ACCOUNT_CNT_PER_TX ));
   }
   if( FD_UNLIKELY( config->firedancer.runtime.max_live_slots<32UL ) ) {
     FD_LOG_ERR(( "max_live_slots must be >= 32 in order to support tower rooting" ));
@@ -1274,7 +1258,7 @@ fd_topo_initialize( config_t * config ) {
                  config->firedancer.runtime.max_live_slots, config->firedancer.accounts.write_delay_slots, FD_ACCDB_MAX_DEPTH_MAX ));
   }
 
-  fd_topo_obj_t * acc_pool_obj = setup_topo_acc_pool( topo, config->firedancer.runtime.max_account_cnt );
+  fd_topo_obj_t * acc_pool_obj = setup_topo_acc_pool( topo, config->firedancer.runtime.concurrent_account_limit );
   FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp",   i   ) ], acc_pool_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FOR(execle_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execle",   i   ) ], acc_pool_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, acc_pool_obj->id, "acc_pool" ) );
@@ -1284,18 +1268,12 @@ fd_topo_initialize( config_t * config ) {
                                 config->firedancer.runtime.program_cache.mean_cache_entry_size ),
       config->firedancer.runtime.max_live_slots,
       config->firedancer.runtime.program_cache.heap_size_mib<<20 );
-  ulong progcache_obj_id;       FD_TEST( (progcache_obj_id       = fd_pod_query_ulong( topo->props, "progcache",       ULONG_MAX ))!=ULONG_MAX );
-  ulong progcache_locks_obj_id; FD_TEST( (progcache_locks_obj_id = fd_pod_query_ulong( topo->props, "progcache_locks", ULONG_MAX ))!=ULONG_MAX );
-  fd_topo_obj_t * progcache_obj       = &topo->objs[ progcache_obj_id       ];
-  fd_topo_obj_t * progcache_locks_obj = &topo->objs[ progcache_locks_obj_id ];
+  ulong progcache_obj_id; FD_TEST( (progcache_obj_id = fd_pod_query_ulong( topo->props, "progcache", ULONG_MAX ))!=ULONG_MAX );
+  fd_topo_obj_t * progcache_obj = &topo->objs[ progcache_obj_id ];
 
   /**/                 fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "replay", 0UL ) ], progcache_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i   ) ], progcache_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FOR(execle_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execle", i   ) ], progcache_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-
-  /**/                 fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "replay", 0UL ) ], progcache_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i   ) ], progcache_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(execle_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execle", i   ) ], progcache_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
 
   if( FD_LIKELY( config->tiles.gui.enabled ) ) {
     fd_topob_wksp( topo, "gui"        );
@@ -1322,6 +1300,7 @@ fd_topo_initialize( config_t * config ) {
     if( FD_LIKELY( snapshots_enabled ) ) {
     /**/                   fd_topob_tile_in(  topo, "gui",    0UL,           "metric_in", "snapct_gui",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
     /**/                   fd_topob_tile_in(  topo, "gui",    0UL,           "metric_in", "snapin_gui",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
+    /**/                   fd_topob_tile_in(  topo, "gui",    0UL,           "metric_in", "snapin_manif",  0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
     }
     if( FD_UNLIKELY( config->tiles.bundle.enabled ) ) {
     /**/                   fd_topob_tile_in(  topo, "gui",    0UL,           "metric_in", "bundle_status", 0UL,         FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
@@ -1338,33 +1317,43 @@ fd_topo_initialize( config_t * config ) {
   fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "repair", 0UL ) ], fec_sets_obj, FD_SHMEM_JOIN_MODE_READ_ONLY );
   FD_TEST( fd_pod_insertf_ulong( topo->props, fec_sets_obj->id, "fec_sets" ) );
 
-   /* The Store fec_max parameter is the max number of FEC sets that can
-      be retained by store.
+   /* store_fec_max is the maximum number of FEC sets Store retains.
 
-      The base value is from multiplying max_live_slots by the maximum
-      number of FEC sets in a block (which is 1024, given the current
-      consensus limit of 32768 shreds per block).  This is notably, the
-      total capacity of reasm.
+      This value is derived by first multiplying max_live_slots by the
+      max_fec_sets_per_slot (which is 1024, given the current consensus
+      limit of 32768 shreds per block).
 
-      Store needs to hold _at least_ depth(shred_out) +
-      depth(repair_out) + 1 more FEC sets than reasm.  Shred inserts
-      FECs into store (before publishing to shred_out) and Replay
-      inserts FECs into reasm (after consuming from repair_out), so
-      store can be up to depth(shred_out) + depth(repair_out) ahead of
-      reasm.  We + 1 because replay tile can be mid-process of ingesting
-      a FEC set.
+      However, the downstream structure reasm also has the same bound.
+      Replay relies on the guarantee that if a FEC set is present in
+      reasm, then it is present in store.  Therefore, store needs
+      additional room for FEC sets that have been inserted into the
+      store but not yet consumed by reasm.
 
-      store is exactly this total depth ahead of reasm, then this means
-      the links must be full and shred is backpressured via repair_out
-      -> shred_out.  Thus, no more FEC sets will be inserted to store
-      until reasm inserts the next FEC, at which point it must be at
-      capacity (given store is _at least_ total depth larger) and will
-      evict a FEC which is together evicted from store. */
+      This exactly equals the sum of link depths between shred (producer
+      into store), repair (intermediate tile) and replay (consumer into
+      reasm).  This is depth(shred_out) + depth(repair_out).
+
+      Shred inserts FECs into store (before publishing to shred_out) and
+      Replay inserts FECs into reasm (after consuming from repair_out),
+      so store can be up to depth(shred_out) + depth(repair_out) ahead
+      of reasm.  We also add one to avoid a race when replay tile has
+      consumed from the link but not yet read from store.
+
+      If store contains this sum of depths more FEC sets than reasm,
+      then the links must be full and shred is backpressured via
+      repair_out -> shred_out.  This guarantees both 1. no more FEC sets
+      will be inserted into the store, which at this point is full and
+      2. no more FEC sets (transitively) will be inserted into reasm,
+      which is also full. */
 
   fd_topo_link_t * repair_out_link = &topo->links[ fd_topo_find_link( topo, "repair_out", 0UL ) ];
-  ulong store_fec_max = fd_ulong_pow2_up( config->firedancer.runtime.max_live_slots * FD_FEC_BLK_MAX + (shred_depth * shred_tile_cnt) + repair_out_link->depth + 1 );
+  ulong store_fec_max = config->firedancer.runtime.max_live_slots * FD_FEC_BLK_MAX + (shred_depth * shred_tile_cnt) + repair_out_link->depth + 1;
 
-  fd_topo_obj_t * store_obj = setup_topo_store( topo, "store", store_fec_max, (uint)shred_tile_cnt );
+  /* 32 shreds * 995 payload bytes = 31840 bytes with fixed_fec_sets = true
+     67 shreds * 955 payload bytes = 63985 bytes with fixed_fec_sets = false */
+
+  ulong store_fec_data_max = fd_ulong_if( config->firedancer.runtime.fixed_fec_sets, 31840UL, 63985UL );
+  fd_topo_obj_t * store_obj = setup_topo_store( topo, "store", store_fec_max, (uint)shred_tile_cnt, store_fec_data_max );
   FOR(shred_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "shred", i ) ], store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "replay", 0UL ) ], store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, store_obj->id, "store" ) );
@@ -1388,28 +1377,30 @@ fd_topo_initialize( config_t * config ) {
   if( FD_UNLIKELY( rpc_enabled ) ) {
     fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "rpc", 0UL ) ], funk_obj,       FD_SHMEM_JOIN_MODE_READ_ONLY  );
     fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "rpc", 0UL ) ], funk_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-    fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "rpc", 0UL ) ], store_obj,      FD_SHMEM_JOIN_MODE_READ_WRITE );
   }
 
   fd_pod_insert_int( topo->props, "sandbox", config->development.sandbox ? 1 : 0 );
 
   if( vinyl_enabled ) {
-    fd_topob_vinyl_rq( topo, "genesi", 0UL, "accdb_genesi", "genesi", 4UL, 1024UL, 1024UL );
-    fd_topob_vinyl_rq( topo, "replay", 0UL, "accdb_replay", "replay", 4UL, 1024UL, 1024UL );
+    fd_topob_vinyl_rq( topo, "genesi", 0UL, "accdb_genesi", "genesi", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
+    fd_topob_vinyl_rq( topo, "replay", 0UL, "accdb_replay", "replay", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
     for( ulong i=0UL; i<execrp_tile_cnt; i++ ) {
-      fd_topob_vinyl_rq( topo, "execrp", i, "accdb_execrp", "execrp", 4UL, 1024UL, 1024UL );
+      fd_topob_vinyl_rq( topo, "execrp", i, "accdb_execrp", "execrp", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
     }
     for( ulong i=0UL; i<execle_tile_cnt; i++ ) {
-      fd_topob_vinyl_rq( topo, "execle", i, "accdb_execle", "execle", 4UL, 1024UL, 1024UL );
+      fd_topob_vinyl_rq( topo, "execle", i, "accdb_execle", "execle", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
     }
-    fd_topob_vinyl_rq( topo, "tower", 0UL, "accdb_tower", "tower", 4UL, 128UL, 128UL );
-    FOR(resolv_tile_cnt) fd_topob_vinyl_rq( topo, "resolv", i, "accdb_resolv", "resolv", 4UL, 1UL, 1UL );
+    fd_topob_vinyl_rq( topo, "tower", 0UL, "accdb_tower", "tower", 4UL, 128UL, 128UL, FD_VINYL_PERM_READ_ONLY );
+    FOR(resolv_tile_cnt) fd_topob_vinyl_rq( topo, "resolv", i, "accdb_resolv", "resolv", 4UL, 1UL, 1UL, FD_VINYL_PERM_READ_ONLY );
     if( rpc_enabled ) {
-      fd_topob_vinyl_rq( topo, "rpc", 0UL, "accdb_rpc", "rpc", 4UL, 1UL, 1UL );
+      fd_topob_vinyl_rq( topo, "rpc", 0UL, "accdb_rpc", "rpc", 4UL, 1UL, 1UL, FD_VINYL_PERM_READ_ONLY );
     }
   }
 
-  for( ulong i=0UL; i<topo->tile_cnt; i++ ) fd_topo_configure_tile( &topo->tiles[ i ], config );
+  for( ulong i=0UL; i<topo->tile_cnt; i++ ) {
+    fd_topo_configure_tile( &topo->tiles[ i ], config );
+    if( FD_UNLIKELY( !strcmp( topo->tiles[ i ].name, "gui" ) ) ) topo->tiles[ i ].gui.tile_cnt = topo->tile_cnt;
+  }
 
   FOR(net_tile_cnt) fd_topos_net_tile_finish( topo, i );
   fd_topob_finish( topo, CALLBACKS );
@@ -1624,7 +1615,6 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
     tile->repair.repair_serve_listen_port  = config->tiles.repair.repair_serve_listen_port;
     tile->repair.slot_max                  = config->tiles.repair.slot_max;
     tile->repair.repair_sign_cnt           = config->firedancer.layout.sign_tile_count - 1; /* -1 because this excludes the keyguard client */
-    tile->repair.end_slot                  = 0;
 
     for( ulong i=0; i<tile->in_cnt; i++ ) {
       if( !strcmp( config->topo.links[ tile->in_link_id[ i ] ].name, "sign_repair" ) ) {
@@ -1649,7 +1639,7 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
     tile->replay.expected_shred_version = config->consensus.expected_shred_version;
     tile->replay.wait_for_vote_to_start_leader = config->consensus.wait_for_vote_to_start_leader;
 
-    tile->replay.sched_depth       = config->firedancer.development.replay.scheduler_depth;
+    tile->replay.sched_depth = config->tiles.replay.max_transaction_lookahead_buffer_size;
     if( FD_LIKELY( !strcmp( config->firedancer.consensus.wait_for_supermajority_with_bank_hash, "" ) ) ) {
       memset( tile->replay.wait_for_supermajority_with_bank_hash.uc, 0, sizeof(fd_pubkey_t) );
     } else if( FD_UNLIKELY( !fd_base58_decode_32( config->firedancer.consensus.wait_for_supermajority_with_bank_hash, tile->replay.wait_for_supermajority_with_bank_hash.uc ) ) ) {
@@ -1811,6 +1801,7 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
   } else if( FD_UNLIKELY( !strcmp( tile->name, "plugin" ) ) ) {
 
   } else if( FD_UNLIKELY( !strcmp( tile->name, "diag" ) ) ) {
+    tile->diag.is_voting = strcmp( config->paths.vote_account, "" );
 
   } else if( FD_UNLIKELY( !strcmp( tile->name, "gui" ) ) ) {
 
@@ -1828,6 +1819,8 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
     tile->gui.schedule_strategy         = config->tiles.pack.schedule_strategy_enum;
     tile->gui.websocket_compression     = 1;
     tile->gui.frontend_release_channel  = config->development.gui.frontend_release_channel_enum;
+    fd_cstr_ncpy( tile->gui.wfs_bank_hash, config->firedancer.consensus.wait_for_supermajority_with_bank_hash, sizeof(tile->gui.wfs_bank_hash) );
+    tile->gui.expected_shred_version = config->consensus.expected_shred_version;
 
   } else if( FD_UNLIKELY( !strcmp( tile->name, "rpc" ) ) ) {
 

@@ -46,7 +46,6 @@ union fdctl_args {
     int  no_configure;
     int  no_init_workspaces;
     int  no_agave;
-    char debug_tile[ 32 ];
   } dev;
 
   struct {
@@ -92,7 +91,6 @@ union fdctl_args {
 
     char         manifest_path[256UL];
     char         iptable_path[256UL];
-    ulong        end_slot;
     ulong        slot;
     int          sort_by_slot;
   } repair;
@@ -108,6 +106,7 @@ union fdctl_args {
     ulong   benchg;
     ulong   benchs;
     int     no_quic;
+    int     no_watch;
     int     transaction_mode;
     float   contending_fraction;
     float   cu_price_spread;
@@ -131,6 +130,7 @@ union fdctl_args {
 
   struct {
     char topo[ 64 ];
+    int  sort;
   } mem;
 
   struct {

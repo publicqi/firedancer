@@ -3,6 +3,7 @@
 
 #include "../../../util/net/fd_net_headers.h"
 #include "../../../flamenco/runtime/fd_runtime_const.h"
+#include "../../../ballet/lthash/fd_lthash.h"
 
 /* The snapshot tiles have a somewhat involved state machine, which is
    controlled by snapct.  Imagine first the following sequence:
@@ -43,9 +44,10 @@
         will not be in an ERROR state and will continue producing frags.
         When snapct receives the ERROR message, it will send a FAIL
         message.  snapct then waits for this FAIL message to be
-        progagated through the pipeline and received back.  It then
-        knows that all tiles are synchonized back in an IDLE state and
-        it can try again with a new INIT.
+        progagated through the pipeline and received back.  snapct
+        also guarantees to flush any pending load data in the
+        pipeline.  It then knows that all tiles are synchronized back
+        in an IDLE state and it can try again with a new INIT.
      4. Once snapct detects that the processing is finished, it sends
         a DONE message through the pipeline and waits for it to be
         received back.  We then either move on to the incremental
@@ -81,21 +83,22 @@
 #define FD_SNAPSHOT_MSG_CTRL_FINI              (9UL) /* Current snapshot has been fully loaded, finish processing */
 
 /* snapin -> snapls */
+#define FD_SNAPSHOT_HASH_MSG_EXPECTED         (10UL) /* Expected accounts hash sent from snapin to snapls */
 /* snapin -> snapwm -> snaplv */
-#define FD_SNAPSHOT_HASH_MSG_EXPECTED         (10UL) /* Hash result sent from snapin to snapls or from snapin to snapwm to snaplv */
+#define FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL  (11UL) /* Combined expected hash and capitalization message sent from snapin to snapwm to snaplv */
 
 /* snapin -> snapls */
-#define FD_SNAPSHOT_HASH_MSG_SUB              (11UL) /* Duplicate account sent from snapin to snapls, includes account header and data */
-#define FD_SNAPSHOT_HASH_MSG_SUB_HDR          (12UL) /* Duplicate account sent from snapin to snapls, only the account header, no data */
-#define FD_SNAPSHOT_HASH_MSG_SUB_DATA         (13UL) /* Duplicate account sent from snapin to snapls, only the account data, no header */
+#define FD_SNAPSHOT_HASH_MSG_SUB              (12UL) /* Duplicate account sent from snapin to snapls, includes account header and data */
+#define FD_SNAPSHOT_HASH_MSG_SUB_HDR          (13UL) /* Duplicate account sent from snapin to snapls, only the account header, no data */
+#define FD_SNAPSHOT_HASH_MSG_SUB_DATA         (14UL) /* Duplicate account sent from snapin to snapls, only the account data, no header */
 /* snapwm -> snaplv */
-#define FD_SNAPSHOT_HASH_MSG_RESULT_SUB       (14UL) /* Duplicate partial hash result sent from snapwm to snaplv (to subtract) */
+#define FD_SNAPSHOT_HASH_MSG_RESULT_SUB       (15UL) /* Duplicate partial hash result sent from snapwm to snaplv (to subtract) */
 /* snapwm -> snaplv -> snaplh */
-#define FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH   (15UL) /* Duplicate account(s) meta batch sent from snapwm to snaplv */
+#define FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH   (16UL) /* Duplicate account(s) meta batch sent from snapwm to snaplv */
 
 /* snapla -> snapls */
 /* snaplh -> snaplv */
-#define FD_SNAPSHOT_HASH_MSG_RESULT_ADD       (16UL) /* Hash result sent from snapla (snaplh) to snapls (snaplv) */
+#define FD_SNAPSHOT_HASH_MSG_RESULT_ADD       (17UL) /* Hash result sent from snapla (snaplh) to snapls (snaplv) */
 
 
 /* Sent by snapct to tell snapld whether to load a local file or
@@ -105,6 +108,7 @@ typedef struct fd_ssctrl_init {
   int           zstd;
   ulong         slot; /* slot advertised by the snapshot peer */
   fd_ip4_port_t addr;
+  uchar         snapshot_hash[ FD_HASH_FOOTPRINT ]; /* advertised snapshot hash from snapshot file name */
   char          hostname[ 256UL ];
   char          path[ PATH_MAX ];
   ulong         path_len;
@@ -115,6 +119,11 @@ typedef struct fd_ssctrl_init {
 typedef struct fd_ssctrl_meta {
   ulong total_sz;
 } fd_ssctrl_meta_t;
+
+typedef struct fd_ssctrl_hash_result {
+  fd_lthash_value_t lthash;
+  long              capitalization;
+} fd_ssctrl_hash_result_t;
 
 struct fd_snapshot_account_hdr {
   uchar   pubkey[ FD_PUBKEY_FOOTPRINT ];
@@ -157,5 +166,42 @@ typedef struct fd_snapshot_full_account fd_snapshot_full_account_t;
 
 #define FD_SNAPSHOT_MAX_SNAPLA_TILES (8UL)
 #define FD_SNAPSHOT_MAX_SNAPLH_TILES (8UL)
+
+static inline const char *
+fd_ssctrl_state_str( ulong state ) {
+  switch( state ) {
+    case FD_SNAPSHOT_STATE_IDLE:        return "idle";
+    case FD_SNAPSHOT_STATE_PROCESSING:  return "processing";
+    case FD_SNAPSHOT_STATE_FINISHING:   return "finishing";
+    case FD_SNAPSHOT_STATE_ERROR:       return "error";
+    case FD_SNAPSHOT_STATE_SHUTDOWN:    return "shutdown";
+    default:                            return "unknown";
+  }
+}
+
+static inline const char *
+fd_ssctrl_msg_ctrl_str( ulong sig ) {
+  switch( sig ) {
+    case FD_SNAPSHOT_MSG_DATA:                  return "data";
+    case FD_SNAPSHOT_MSG_META:                  return "meta";
+    case FD_SNAPSHOT_MSG_CTRL_INIT_FULL:        return "init_full";
+    case FD_SNAPSHOT_MSG_CTRL_INIT_INCR:        return "init_incr";
+    case FD_SNAPSHOT_MSG_CTRL_FAIL:             return "fail";
+    case FD_SNAPSHOT_MSG_CTRL_NEXT:             return "next";
+    case FD_SNAPSHOT_MSG_CTRL_DONE:             return "done";
+    case FD_SNAPSHOT_MSG_CTRL_SHUTDOWN:         return "shutdown";
+    case FD_SNAPSHOT_MSG_CTRL_ERROR:            return "error";
+    case FD_SNAPSHOT_MSG_CTRL_FINI:             return "fini";
+    case FD_SNAPSHOT_HASH_MSG_EXPECTED:         return "hash_expected";
+    case FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL:  return "hash_exp_and_capital";
+    case FD_SNAPSHOT_HASH_MSG_SUB:              return "hash_sub";
+    case FD_SNAPSHOT_HASH_MSG_SUB_HDR:          return "hash_sub_hdr";
+    case FD_SNAPSHOT_HASH_MSG_SUB_DATA:         return "hash_sub_data";
+    case FD_SNAPSHOT_HASH_MSG_RESULT_SUB:       return "hash_result_sub";
+    case FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH:   return "hash_sub_meta_batch";
+    case FD_SNAPSHOT_HASH_MSG_RESULT_ADD:       return "hash_result_add";
+    default:                                    return "unknown";
+  }
+}
 
 #endif /* HEADER_fd_src_discof_restore_utils_fd_ssctrl_h */

@@ -8,18 +8,40 @@
 
 FD_PROTOTYPES_BEGIN
 
-/* All of the variable bounds in the bank should be deteremined by the
-   max number of vote accounts and stake accounts that the system
-   supports. These are not protocol-level bounds, but rather bounds
-   that are used to determine the max amount of memory that various
-   data structures require. */
+/* FD_RUNTIME_MAX_{STAKE,VOTE}_ACCOUNTS are the maximum number of stake
+   and vote accounts that the system supports: anything larger will
+   result in a crash. The bounds were set with the intention of making a
+   dos vector to mint stake/vote accounts financially infeasible.  A
+   reasonable value to guard against this attack is roughly 550,000 SOL.
 
-#define FD_RUNTIME_MAX_VOTE_ACCOUNTS         (40200UL)
-#define FD_RUNTIME_EXPECTED_VOTE_ACCOUNTS    (2048UL)
+   For vote accounts, the limit is set to 19,000,000 because the rent
+   exempt reserve of creating a valid vote account is ~0.03 SOL.  For
+   each vote account, it also must be staked.  Each stake account has a
+   rent exempt value of ~0.022 SOL.  This means the cost of minting 20M
+   vote accounts is:
+   19,000,000 accounts * 0.02685 SOL = 510,150 SOL.
+   19,000,000 accounts * 0.00228 SOL = 43,320 SOL.
+   Total cost: 553,470 SOL.
+   In reality, the cost is slightly higher because of transaction fees
+   and various CU costs to create the vote and stake accounts.
 
-#define FD_RUNTIME_MAX_STAKE_ACCOUNTS (3000000UL) /* 3M stake accounts */
+   For stake accounts, the limit is set to 241M because the rent exempt
+   reserve of creating a valid stake account is
+   241,000,000 accounts * 0.00228 SOL = 549,480 SOL.
+   If you just consider the transaction fee of 0.000005 per account
+   241,000,000 * 0.000005 = 1,205 SOL.
+   This brings our total cost to 550,685 SOL. */
+
+#define FD_RUNTIME_MAX_VOTE_ACCOUNTS  (19000000UL)
+#define FD_RUNTIME_MAX_STAKE_ACCOUNTS (241000000UL)
+
+/* The expected stake and vote account values are based on observed
+   values on mainnet and testnet allowing for some growth.  These are
+   chosen to size various caches and maps: they are not intended to be
+   exact as they are not consensus critical values. */
 
 #define FD_RUNTIME_EXPECTED_STAKE_ACCOUNTS (2000000UL)
+#define FD_RUNTIME_EXPECTED_VOTE_ACCOUNTS  (16384UL)
 
 #define FD_RUNTIME_SLOTS_PER_EPOCH    (432000UL)  /* 432k slots per epoch */
 
@@ -210,87 +232,6 @@ FD_PROTOTYPES_BEGIN
 
 #define BPF_LOADER_SERIALIZATION_FOOTPRINT (671761968UL)
 FD_STATIC_ASSERT( BPF_LOADER_SERIALIZATION_FOOTPRINT==FD_BPF_LOADER_INPUT_REGION_FOOTPRINT(64UL, 0), bpf_loader_serialization_footprint );
-
-
-/* Some vote instruction types are dynamically sized:
-    - tower_sync_switch                (contains deque of fd_vote_lockout_t)
-    - tower_sync                       (contains deque of fd_vote_lockout_t)
-    - compact_vote_state_update_switch (vector of fd_lockout_offset_t)
-    - compact_vote_state_update        (vector of fd_lockout_offset_t)
-    - authorize_checked_with_seed      (char vector of current_authority_derived_key_seed)
-    - authorize_with_seed              (char vector of current_authority_derived_key_seed)
-    - update_vote_state_switch         (contains deque of fd_vote_lockout_t)
-    - update_vote_state                (contains deque of fd_vote_lockout_t)
-    - vote_switch                      (deque of slot numbers)
-    - vote                             (deque of slot numbers)
-   All other vote instruction types are statically sized.
-
-   A loose bound on the max amount of encoded fd_vote_lockout_t
-   possible is 1232 bytes/(12 bytes/per lockout) = 102 lockouts.  So
-   the worst case bound for the deque of fd_vote_lockout is
-   32 + (102 * sizeof(fd_vote_lockout_t)) = 1644 bytes.
-
-   The worst case vector of fd_lockout_offset_t is one where each
-   encoded element is 2 bytes.  This means that we can have 1232/2 =
-   616 elements.  They are represented as being 16 bytes each, so the
-   total footprint would be 9856 bytes.
-
-   The deque of slot numbers is a vector of ulong, which is 8 bytes.
-   So the worst case is 1232 bytes/8 bytes = 154 elements.  So, the
-   total footprint is 32 + (154 * 8 bytes) = 1264 bytes.
-
-   The worst case char vector is 1232 bytes as each element is 1 byte
-   up to the txn MTU.
-
-   With this, that means that the compact_vote_state_update_switch
-   can have the largest worst case footprint where the struct is
-   104 bytes (sizeof(fd_compact_vote_state_update_switch_t) + the
-   worst case lockout vector of 616 elements. */
-#define FD_LOCKOUT_OFFSET_FOOTPRINT   (9856UL)
-#define FD_VOTE_INSTRUCTION_FOOTPRINT (sizeof(fd_vote_instruction_t) + FD_LOCKOUT_OFFSET_FOOTPRINT)
-
-/* This footprint is obtained by taking the max of the fd_types decode
-   footprints for the following vote state versions and associated
-   bounds:
-      - all Option<T> fields are Some(T)
-      - votes: max capacity of 32
-      - authorized_voters: max capacity of 5
-      - epoch_credits: max capacity of 64
-
-   v1_14_11: 4496
-   v3:       4752
-   v4:       4752
-
-   The authorized_voters min capacity is 5
-   (FD_VOTE_AUTHORIZED_VOTERS_MIN) to account for the transient
-   push-before-pop in get_and_cache_authorized_voter_for_epoch before
-   purge. */
-#define FD_VOTE_STATE_VERSIONED_FOOTPRINT (4752UL)
-
-/* The footprint of a fd_vote_authorized_voters_t struct is defined as a
-   fd_vote_authorized_voters_t followed by a pool and then a treap. */
-#define FD_AUTHORIZED_VOTERS_ALIGN     (128UL)
-#define FD_AUTHORIZED_VOTERS_FOOTPRINT (4888UL)
-
-/* TODO: These footprints are currently overprovisioned due to test
-   fixtures which currently violate protocol invariants. */
-
-/* The footprint of the landed votes is determined by a deque with max
-   cnt of 31.  The footprint is as follows:
-   alignof(DEQUE_T) == alignof(fd_landed_vote_t) == 8
-   sizeof(DEQUE_T)  == sizeof(fd_landed_vote_t)  == 24
-   return fd_ulong_align_up( fd_ulong_align_up( 32UL, alignof(DEQUE_T) ) + sizeof(DEQUE_T)*max, alignof(DEQUE_(private_t)) );
-   return fd_ulong_align_up( fd_ulong_align_up( 32UL, 8UL ) )            + 24UL*31UL, 8UL );
-   return fd_ulong_align_up( 32UL + 744, 8UL ) == 776 */
-#define FD_LANDED_VOTES_ALIGN     (32UL)
-#define FD_LANDED_VOTES_FOOTPRINT (FD_VOTE_STATE_VERSIONED_FOOTPRINT)
-
-/* The calculation for the landed votes footprint is the same as the
-   calculation for the landed votes but the sizeof(fd_vote_lockout_t)
-   is 16 bytes:
-   return fd_ulong_align_up( 32UL + 16UL * 31UL, 8UL ) == 528UL */
-#define FD_VOTE_LOCKOUTS_ALIGN     (32UL)
-#define FD_VOTE_LOCKOUTS_FOOTPRINT (FD_VOTE_STATE_VERSIONED_FOOTPRINT)
 
 #define FD_EPOCH_CREDITS_MAX (64UL)
 

@@ -72,8 +72,7 @@ fd_sysvar_epoch_schedule_read( fd_accdb_user_t *         accdb,
   fd_epoch_schedule_t * rc = fd_bincode_decode_static(
       epoch_schedule, out,
       fd_accdb_ref_data_const( ro ),
-      fd_accdb_ref_data_sz   ( ro ),
-      NULL );
+      fd_accdb_ref_data_sz   ( ro ) );
   fd_accdb_close_ro( accdb, ro );
   return rc;
 }
@@ -83,7 +82,7 @@ fd_sysvar_epoch_schedule_init( fd_bank_t *               bank,
                                fd_accdb_user_t *         accdb,
                                fd_funk_txn_xid_t const * xid,
                                fd_capture_ctx_t *        capture_ctx ) {
-  fd_epoch_schedule_t const * epoch_schedule = fd_bank_epoch_schedule_query( bank );
+  fd_epoch_schedule_t const * epoch_schedule = &bank->f.epoch_schedule;
   fd_sysvar_epoch_schedule_write( bank, accdb, xid, capture_ctx, epoch_schedule );
 }
 

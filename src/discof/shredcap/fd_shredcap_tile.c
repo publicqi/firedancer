@@ -1,6 +1,7 @@
 #define _GNU_SOURCE  /* Enable GNU and POSIX extensions */
 #include "../../disco/topo/fd_topo.h"
 #include "../../disco/net/fd_net_tile.h"
+#include "../../disco/shred/fd_shred_tile.h"
 #include "../../flamenco/types/fd_types.h"
 #include "../../flamenco/fd_flamenco_base.h"
 #include "../../util/pod/fd_pod_format.h"
@@ -9,7 +10,6 @@
 #include "../../discof/fd_discof.h"
 #include "../../discof/repair/fd_repair.h"
 #include "../../discof/replay/fd_replay_tile.h"
-#include "../../discof/replay/fd_execrp.h"
 #include "../../discof/restore/utils/fd_ssmsg.h"
 #include "../../discof/restore/utils/fd_ssmanifest_parser.h"
 #include "../../flamenco/runtime/sysvar/fd_sysvar_epoch_schedule.h"
@@ -219,36 +219,38 @@ generate_epoch_info_msg_manifest( ulong                                       ep
                                   fd_snapshot_manifest_epoch_stakes_t const * epoch_stakes,
                                   ulong *                                     epoch_info_msg_out ) {
   fd_epoch_info_msg_t *    epoch_info_msg = (fd_epoch_info_msg_t *)fd_type_pun( epoch_info_msg_out );
-  fd_vote_stake_weight_t * stake_weights  = epoch_info_msg->weights;
+  fd_vote_stake_weight_t * stake_weights  = fd_epoch_info_msg_stake_weights( epoch_info_msg );
 
   epoch_info_msg->epoch             = epoch;
-  epoch_info_msg->staked_cnt        = epoch_stakes->vote_stakes_len;
   epoch_info_msg->start_slot        = fd_epoch_slot0( epoch_schedule, epoch );
-  epoch_info_msg->slot_cnt          = epoch_schedule->slots_per_epoch;
-  epoch_info_msg->excluded_stake    = 0UL;
-  epoch_info_msg->vote_keyed_lsched = 1UL;
-
-  /* FIXME: SIMD-0180 - hack to (de)activate in testnet vs mainnet.
-     This code can be removed once the feature is active. */
-  {
-    if(    ( 1==epoch_schedule->warmup && epoch<FD_SIMD0180_ACTIVE_EPOCH_TESTNET )
-        || ( 0==epoch_schedule->warmup && epoch<FD_SIMD0180_ACTIVE_EPOCH_MAINNET ) ) {
-      epoch_info_msg->vote_keyed_lsched = 0UL;
-    }
-  }
+  epoch_info_msg->slot_cnt          = fd_epoch_slot_cnt( epoch_schedule, epoch );
+  epoch_info_msg->excluded_id_stake = 0UL;
 
   /* Set all features as deactivated as we don't have available feature info from manifest. */
   fd_memset( &epoch_info_msg->features, 0xFF, sizeof(fd_features_t) );
 
-  /* epoch_stakes from manifest are already filtered (stake>0), but not sorted */
+  /* Filter zero-stake entries (match replay: wsample and leader schedule reject zero weight). */
+  ulong idx = 0UL;
   for( ulong i=0UL; i<epoch_stakes->vote_stakes_len; i++ ) {
-    stake_weights[ i ].stake = epoch_stakes->vote_stakes[ i ].stake;
-    memcpy( stake_weights[ i ].id_key.uc, epoch_stakes->vote_stakes[ i ].identity, sizeof(fd_pubkey_t) );
-    memcpy( stake_weights[ i ].vote_key.uc, epoch_stakes->vote_stakes[ i ].vote, sizeof(fd_pubkey_t) );
+    ulong stake = epoch_stakes->vote_stakes[ i ].stake;
+    if( FD_UNLIKELY( !stake ) ) continue;
+    stake_weights[ idx ].stake = stake;
+    memcpy( stake_weights[ idx ].id_key.uc, epoch_stakes->vote_stakes[ i ].identity, sizeof(fd_pubkey_t) );
+    memcpy( stake_weights[ idx ].vote_key.uc, epoch_stakes->vote_stakes[ i ].vote, sizeof(fd_pubkey_t) );
+    idx++;
   }
-  sort_vote_weights_by_stake_vote_inplace( stake_weights, epoch_stakes->vote_stakes_len);
+  epoch_info_msg->staked_vote_cnt = idx;
+  sort_vote_weights_by_stake_vote_inplace( stake_weights, idx );
 
-  return fd_epoch_info_msg_sz( epoch_stakes->vote_stakes_len );
+  fd_stake_weight_t * id_weights = fd_epoch_info_msg_id_weights( epoch_info_msg );
+
+  epoch_info_msg->staked_id_cnt = compute_id_weights_from_vote_weights( id_weights, stake_weights, epoch_info_msg->staked_vote_cnt );
+
+  FD_TEST( idx<=MAX_SHRED_DESTS );
+
+  epoch_info_msg->epoch_schedule = *epoch_schedule;
+
+  return fd_epoch_info_msg_sz( epoch_info_msg->staked_vote_cnt, epoch_info_msg->staked_id_cnt );
 }
 
 static void
@@ -328,7 +330,7 @@ during_frag( fd_capture_tile_ctx_t * ctx,
              ulong                   ctl ) {
   ctx->skip_frag = 0;
   if( ctx->in_kind[ in_idx ]==SHRED_OUT ) {
-    if( fd_disco_shred_out_msg_type( sig ) != FD_SHRED_OUT_MSG_TYPE_FEC ) {
+    if( sig != SHRED_SIG_FEC_COMPLETE && sig != SHRED_SIG_FEC_COMPLETE_LEADER ) {
       ctx->skip_frag = 1;
       return;
     }
@@ -573,8 +575,10 @@ after_frag( fd_capture_tile_ctx_t * ctx,
     /* This is a fec completes message! we can use it to check how long
        it takes to complete a fec */
 
-    fd_shred_t const * shred = (fd_shred_t *)fd_type_pun( ctx->shred_buffer );
-    uint data_cnt = fd_disco_shred_out_fec_sig_data_cnt( sig );
+    fd_fec_complete_t const * completes = (fd_fec_complete_t *)fd_type_pun( ctx->shred_buffer );
+    fd_shred_t const * shred = &completes->last_shred_hdr;
+
+    uint data_cnt = FD_FEC_SHRED_CNT;
     uint ref_tick = shred->data.flags & FD_SHRED_DATA_REF_TICK_MASK;
     char fec_complete[1024];
     snprintf( fec_complete, sizeof(fec_complete),
@@ -851,7 +855,7 @@ unprivileged_init( fd_topo_t *      topo,
   init_file_handlers( ctx, &ctx->bank_hashes_fd, tile->shredcap.bank_hashes_fd, &ctx->bank_hashes_buf, &ctx->bank_hashes_ostream );
 }
 
-#define STEM_BURST (1UL)
+#define STEM_BURST (2UL)
 #define STEM_LAZY  (50UL)
 
 #define STEM_CALLBACK_CONTEXT_TYPE  fd_capture_tile_ctx_t

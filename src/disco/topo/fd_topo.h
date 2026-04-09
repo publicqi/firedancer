@@ -365,6 +365,10 @@ struct fd_topo_tile {
 
       int websocket_compression;
       int frontend_release_channel;
+      ulong tile_cnt;
+
+      char   wfs_bank_hash[ FD_BASE58_ENCODED_32_SZ ];
+      ushort expected_shred_version;
     } gui;
 
     struct {
@@ -386,6 +390,10 @@ struct fd_topo_tile {
       uint   prometheus_listen_addr;
       ushort prometheus_listen_port;
     } metric;
+
+    struct {
+      int is_voting;
+    } diag;
 
     struct {
       ulong fec_max;
@@ -478,8 +486,6 @@ struct fd_topo_tile {
 
       ulong   repair_sign_depth;
       ulong   repair_sign_cnt;
-
-      ulong   end_slot; /* repair profiler mode only */
     } repair;
 
     struct {
@@ -692,7 +698,7 @@ typedef struct {
    between them. */
 struct fd_topo {
   char           app_name[ 256UL ];
-  uchar          props[ 16384UL ];
+  uchar          props[ 32768UL ];
 
   ulong          wksp_cnt;
   ulong          link_cnt;
@@ -1171,8 +1177,6 @@ fd_topo_run_tile( fd_topo_t *          topo,
                   uint                 uid,
                   uint                 gid,
                   int                  allow_fd,
-                  volatile int *       wait,
-                  volatile int *       debugger,
                   fd_topo_run_tile_t * tile_run );
 
 /* This is for determining the value of RLIMIT_MLOCK that we need to
@@ -1225,6 +1229,12 @@ FD_FN_PURE ulong
 fd_topo_huge_page_cnt( fd_topo_t const * topo,
                        ulong             numa_idx,
                        int               include_anonymous );
+
+/* Returns the number of normal (4 KiB) pages needed by the topology
+   for extra allocations like private key storage and XSK rings. */
+
+FD_FN_PURE ulong
+fd_topo_normal_page_cnt( fd_topo_t const * topo );
 
 /* Prints a message describing the topology to an output stream.  If
    stdout is true, will be written to stdout, otherwise will be written

@@ -23,6 +23,7 @@
 #include "../../../disco/topo/fd_topob_vinyl.h"
 #include "../../../util/pod/fd_pod_format.h"
 #include "../../../discof/genesis/fd_genesi_tile.h"
+#include "../../../disco/shred/fd_shred_tile.h"
 #include "../../../discof/reasm/fd_reasm.h"
 #include "../../../discof/replay/fd_replay_tile.h"
 #include "../../../discof/restore/fd_snapin_tile_private.h"
@@ -98,10 +99,8 @@ backtest_topo( config_t * config ) {
                                 config->firedancer.runtime.program_cache.mean_cache_entry_size ),
       config->firedancer.runtime.max_live_slots,
       config->firedancer.runtime.program_cache.heap_size_mib<<20 );
-  ulong progcache_obj_id;       FD_TEST( (progcache_obj_id       = fd_pod_query_ulong( topo->props, "progcache",       ULONG_MAX ) )!=ULONG_MAX );
-  ulong progcache_locks_obj_id; FD_TEST( (progcache_locks_obj_id = fd_pod_query_ulong( topo->props, "progcache_locks", ULONG_MAX ) )!=ULONG_MAX );
-  fd_topob_tile_uses( topo, replay_tile, &topo->objs[ progcache_obj_id       ], FD_SHMEM_JOIN_MODE_READ_WRITE );
-  fd_topob_tile_uses( topo, replay_tile, &topo->objs[ progcache_locks_obj_id ], FD_SHMEM_JOIN_MODE_READ_WRITE );
+  ulong progcache_obj_id; FD_TEST( (progcache_obj_id = fd_pod_query_ulong( topo->props, "progcache", ULONG_MAX ) )!=ULONG_MAX );
+  fd_topob_tile_uses( topo, replay_tile, &topo->objs[ progcache_obj_id ], FD_SHMEM_JOIN_MODE_READ_WRITE );
 
   /**********************************************************************/
   /* Add the executor tiles to topo                                     */
@@ -183,7 +182,7 @@ backtest_topo( config_t * config ) {
      batches from the CLI-specified source (eg. RocksDB). */
 
   fd_topob_wksp( topo, "repair_out" );
-  fd_topob_link( topo, "repair_out", "repair_out", 65536UL, FD_SHRED_OUT_MTU, 1UL );
+  fd_topob_link( topo, "repair_out", "repair_out", 65536UL, sizeof(fd_fec_complete_t), 1UL );
   fd_topob_tile_in( topo, "replay", 0UL, "metric_in", "repair_out", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
   fd_topob_tile_out( topo, "backt", 0UL, "repair_out", 0UL );
 
@@ -237,8 +236,9 @@ backtest_topo( config_t * config ) {
        guarantee enough mcache credits.  The mtu needs to be adjusted
        so that the total dcache size matches what snapin requires.
        Round up the mtu (ulong) size using: (...+(depth-1))/depth. */
-      fd_topob_link( topo, "snapin_txn", "snapin_txn",   16UL, (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
-      fd_topob_link( topo, "snapin_wm", "snapin_wm",     16UL, FD_SNAPWM_PAIR_BATCH_SZ_MAX,       1UL );
+      fd_topo_link_t * snapin_txn = fd_topob_link( topo, "snapin_txn", "snapin_txn",   16UL, (sizeof(fd_sstxncache_entry_t)*FD_SNAPIN_TXNCACHE_MAX_ENTRIES+15UL/*depth-1*/)/16UL/*depth*/, 1UL );
+      /**/                          fd_topob_link( topo, "snapin_wm", "snapin_wm",     16UL, FD_SNAPWM_PAIR_BATCH_SZ_MAX,       1UL );
+      fd_pod_insertf_ulong( topo->props, sizeof(ulong), "obj.%lu.app_sz", snapin_txn->dcache_obj_id );
       /* snapwh and snapwr both use snapwm_wh's dcache.  snapwh sends
          control messages to snapwr, using snapwh_wr link, instructing
          which chunks in the dcache are ready to be consumed by snapwr. */
@@ -255,8 +255,8 @@ backtest_topo( config_t * config ) {
       }
     } else {
       if( vinyl_enabled ) {
-        FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",    128UL,   sizeof(fd_lthash_value_t),     1UL );
-        /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL, FD_SNAPWM_DUP_META_BATCH_SZ,     1UL );
+        FOR(snaplh_tile_cnt) fd_topob_link( topo, "snaplh_lv",  "snaplh_lv",    128UL,   sizeof(fd_ssctrl_hash_result_t),     1UL );
+        /**/                 fd_topob_link( topo, "snapwm_lv",  "snapwm_lv",  32768UL, FD_SNAPWM_DUP_META_BATCH_SZ,     1UL+sizeof(fd_ssctrl_hash_result_t)/FD_SNAPWM_DUP_META_BATCH_SZ ); /* snapwm forwards 1 fd_ssctrl_hash_result_t message (hash and capitalization) per snapshot load */
         /**/                 fd_topob_link( topo, "snaplv_lh",  "snaplv_lh", 262144UL,       FD_SNAPLV_DUP_META_SZ, FD_SNAPLV_STEM_BURST ); /* FD_SNAPWM_DUP_META_BATCH_CNT_MAX times the depth of snapwm_lv */
         /**/                 fd_topob_link( topo, "snaplv_ct",  "snaplv_ct",    128UL,                         0UL,     1UL );
       } else {
@@ -296,7 +296,7 @@ backtest_topo( config_t * config ) {
       fd_topob_tile_out( topo, "snapin", 0UL,              "snapin_wm", 0UL );
       fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_wm", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
       fd_topob_tile_out( topo, "snapin", 0UL,              "snapin_txn",0UL );
-      fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_txn",0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
+      fd_topob_tile_in ( topo, "snapwm", 0UL, "metric_in", "snapin_txn",0UL, FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
       fd_topob_tile_out( topo, "snapwm", 0UL,              "snapwm_wh", 0UL );
       fd_topob_tile_in ( topo, "snapwh", 0UL, "metric_in", "snapwm_wh", 0UL, FD_TOPOB_RELIABLE, FD_TOPOB_POLLED );
       fd_topob_tile_out( topo, "snapwh", 0UL,              "snapwh_wr", 0UL );
@@ -446,12 +446,13 @@ backtest_topo( config_t * config ) {
   }
 
   fd_topob_wksp( topo, "store" );
-  fd_topo_obj_t * store_obj = setup_topo_store( topo, "store", config->firedancer.runtime.max_live_slots * FD_SHRED_BLK_MAX, 1 );
+  ulong store_fec_data_max = fd_ulong_if( config->firedancer.runtime.fixed_fec_sets, 31840UL, 63985UL );
+  fd_topo_obj_t * store_obj = setup_topo_store( topo, "store", config->firedancer.runtime.max_live_slots * FD_SHRED_BLK_MAX, 1, store_fec_data_max );
   fd_topob_tile_uses( topo, backt_tile, store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   fd_topob_tile_uses( topo, replay_tile, store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, store_obj->id, "store" ) );
 
-  fd_topo_obj_t * acc_pool_obj = setup_topo_acc_pool( topo, config->firedancer.runtime.max_account_cnt );
+  fd_topo_obj_t * acc_pool_obj = setup_topo_acc_pool( topo, config->firedancer.runtime.concurrent_account_limit );
   fd_topob_tile_uses( topo, replay_tile, acc_pool_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i ) ], acc_pool_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, acc_pool_obj->id, "acc_pool" ) );
@@ -462,13 +463,6 @@ backtest_topo( config_t * config ) {
   fd_topob_tile_uses( topo, replay_tile, banks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i ) ], banks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, banks_obj->id, "banks" ) );
-
-  /* banks_locks_obj shared by replay and exec tiles */
-  fd_topob_wksp( topo, "banks_locks" );
-  fd_topo_obj_t * banks_locks_obj = setup_topo_banks_locks( topo, "banks_locks" );
-  fd_topob_tile_uses( topo, replay_tile, banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FOR(execrp_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "execrp", i ) ], banks_locks_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
-  FD_TEST( fd_pod_insertf_ulong( topo->props, banks_locks_obj->id, "banks_locks" ) );
 
   /* txncache_obj shared by replay, snapin, and execrp tiles */
   fd_topob_wksp( topo, "txncache"    );
@@ -500,9 +494,9 @@ backtest_topo( config_t * config ) {
   }
 
   if( vinyl_enabled ) {
-    fd_topob_vinyl_rq( topo, "replay", 0UL, "accdb_replay", "replay", 4UL, 1024UL, 1024UL );
+    fd_topob_vinyl_rq( topo, "replay", 0UL, "accdb_replay", "replay", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
     for( ulong i=0UL; i<execrp_tile_cnt; i++ ) {
-      fd_topob_vinyl_rq( topo, "execrp", i, "accdb_execrp", "execrp", 4UL, 1024UL, 1024UL );
+      fd_topob_vinyl_rq( topo, "execrp", i, "accdb_execrp", "execrp", 4UL, 1024UL, 1024UL, FD_VINYL_PERM_READ_WRITE );
     }
   }
 
@@ -522,11 +516,8 @@ backtest_topo( config_t * config ) {
   fd_topob_finish( topo, CALLBACKS );
 }
 
-extern int * fd_log_private_shared_lock;
-
 static void
 backtest_cmd_topo( config_t * config ) {
-  config->firedancer.development.replay.scheduler_depth = 8192UL;
   backtest_topo( config );
 }
 
@@ -610,7 +601,6 @@ backtest_cmd_fn( args_t *   args,
   initialize_workspaces( config );
   initialize_stacks( config );
 
-  fd_log_private_shared_lock[ 1 ] = 0;
   fd_topo_join_workspaces( &config->topo, FD_SHMEM_JOIN_MODE_READ_WRITE, FD_TOPO_CORE_DUMP_LEVEL_DISABLED );
   fd_topo_fill( &config->topo );
 

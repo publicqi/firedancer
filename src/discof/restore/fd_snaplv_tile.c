@@ -41,6 +41,10 @@ struct fd_snaplv_tile {
 
   out_link_t          out_link[OUT_LINK_CNT];
 
+  long running_capitalization;
+  long dup_capitalization;
+  long manifest_capitalization;
+
   struct {
     ulong             bstream_seq_last;
     struct {
@@ -69,6 +73,7 @@ struct fd_snaplv_tile {
 
   struct {
     fd_lthash_value_t full_lthash;
+    long              capitalization;
   } recovery;
 
   struct {
@@ -230,11 +235,15 @@ handle_data_frag( fd_snaplv_t *       ctx,
     return;
   }
   if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING ) ) {
-    FD_LOG_ERR(( "invalid state %u for data frag %lu", ctx->state, sig ));
+    FD_LOG_ERR(( "received data frag %s (%lu) while in unexpected state %s (%u)",
+                 fd_ssctrl_msg_ctrl_str( sig ), sig,
+                 fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
     return;
   }
   if( FD_UNLIKELY( sig!=FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH ) ) {
-    FD_LOG_ERR(( "unexpected sig %lu in handle_data_frag", sig ));
+    FD_LOG_ERR(( "received incorrect data frag %s (%lu) in state %s (%u)",
+                 fd_ssctrl_msg_ctrl_str( sig ), sig,
+                 fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
     return;
   }
 
@@ -244,7 +253,7 @@ handle_data_frag( fd_snaplv_t *       ctx,
   ulong const batch_sz  = sz;
   ulong const batch_cnt = tspub;
   if( FD_UNLIKELY( batch_cnt>FD_SNAPLV_DUP_BATCH_IN_CNT_MAX ) ) {
-    FD_LOG_CRIT(( "batch count %lu exceeds FD_SNAPLV_DUP_BATCH_IN_CNT_MAX %lu", batch_cnt, FD_SNAPLV_DUP_BATCH_IN_CNT_MAX ));
+    FD_LOG_CRIT(( "batch count %lu exceeds batch count max %lu", batch_cnt, FD_SNAPLV_DUP_BATCH_IN_CNT_MAX ));
   }
   if( FD_UNLIKELY( (batch_cnt*acc_sz)!=batch_sz ) ) {
     FD_LOG_CRIT(( "batch count %lu with account size %lu does not match batch size %lu", batch_cnt, acc_sz, batch_sz ));
@@ -308,8 +317,16 @@ handle_control_frag( fd_snaplv_t *       ctx,
   (void)in_idx;
 
   if( ctx->in_kind[ in_idx ]==IN_KIND_SNAPLH ) {
-    if( FD_UNLIKELY( !ctx->fail.wait ) ) FD_LOG_CRIT(( "received unexpected sig %lu msg from snaplh", sig ));
-    if( FD_UNLIKELY( sig!=FD_SNAPSHOT_MSG_CTRL_FAIL ) ) FD_LOG_CRIT(( "received incorrect sig %lu msg from snaplh", sig ));
+    if( FD_UNLIKELY( !ctx->fail.wait ) ) {
+      FD_LOG_CRIT(( "received unexpected control frag %s (%lu) from snaplh in state %s (%u)",
+                    fd_ssctrl_msg_ctrl_str( sig ), sig,
+                    fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
+    }
+    if( FD_UNLIKELY( sig!=FD_SNAPSHOT_MSG_CTRL_FAIL ) ) {
+      FD_LOG_CRIT(( "received incorrect control frag %s (%lu) from snaplh in state %s (%u)",
+                    fd_ssctrl_msg_ctrl_str( sig ), sig,
+                    fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
+    }
     ctx->fail.ack_cnt++;
     return;
   }
@@ -334,12 +351,16 @@ handle_control_frag( fd_snaplv_t *       ctx,
       if( sig==FD_SNAPSHOT_MSG_CTRL_INIT_FULL ) {
         fd_lthash_zero( &ctx->hash_accum.calculated_lthash );
         fd_lthash_zero( &ctx->recovery.full_lthash );
+        ctx->running_capitalization = 0L;
+        ctx->dup_capitalization     = 0L;
       } else {
         /* The lthash for the incremental snapshot is computed starting
            from the full snapshot lthash.  Since an init message may
            be received after a fail message, always start from the
            recovery value. */
         ctx->hash_accum.calculated_lthash = ctx->recovery.full_lthash;
+        ctx->running_capitalization = ctx->recovery.capitalization;
+        ctx->dup_capitalization     = 0L;
       }
 
       break;
@@ -359,9 +380,11 @@ handle_control_frag( fd_snaplv_t *       ctx,
     case FD_SNAPSHOT_MSG_CTRL_DONE: {
       FD_TEST( ctx->state==FD_SNAPSHOT_STATE_FINISHING );
       ctx->state = FD_SNAPSHOT_STATE_IDLE;
+
       /* back up full_lthash for future recovery. */
       if( sig==FD_SNAPSHOT_MSG_CTRL_NEXT ) {
-        ctx->recovery.full_lthash = ctx->hash_accum.calculated_lthash;
+        ctx->recovery.full_lthash    = ctx->hash_accum.calculated_lthash;
+        ctx->recovery.capitalization = ctx->running_capitalization;
       }
       break;
     }
@@ -375,6 +398,17 @@ handle_control_frag( fd_snaplv_t *       ctx,
     case FD_SNAPSHOT_MSG_CTRL_FAIL: {
       FD_TEST( ctx->state!=FD_SNAPSHOT_STATE_SHUTDOWN );
       ctx->state = FD_SNAPSHOT_STATE_IDLE;
+
+      /* Discard buffered pending duplicate requests, to prevent them
+         from being emitted from this point onward. */
+      memset( ctx->vinyl.pending.active, 0, FD_SNAPLV_DUP_PENDING_CNT_MAX*sizeof(int) );
+      ctx->vinyl.pending_cnt = 0UL;
+
+      /* Reset hash accumulation state, to avoid publishing FINI to
+         snapct if awaiting_results was set before CTRL_FAIL. */
+      ctx->hash_accum.awaiting_results = 0;
+      ctx->hash_accum.received_lthashes = 0UL;
+
       ctx->fail.exp_sig = FD_SNAPSHOT_MSG_CTRL_FAIL;
       ctx->fail.ack_cnt = 0UL;
       ctx->fail.wait = 1;
@@ -389,7 +423,9 @@ handle_control_frag( fd_snaplv_t *       ctx,
     }
 
     default: {
-      FD_LOG_ERR(( "unexpected control sig %lu", sig ));
+      FD_LOG_ERR(( "unexpected control frag %s (%lu) in state %s (%u)",
+                   fd_ssctrl_msg_ctrl_str( sig ), sig,
+                   fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
       break;
     }
   }
@@ -401,48 +437,86 @@ handle_control_frag( fd_snaplv_t *       ctx,
 }
 
 static void
-handle_hash_frag( fd_snaplv_t * ctx,
-                  ulong         in_idx,
-                  ulong         sig,
-                  ulong         chunk,
-                  ulong         sz ) {
+handle_hash_frag( fd_snaplv_t *       ctx,
+                  fd_stem_context_t * stem,
+                  ulong               in_idx,
+                  ulong               sig,
+                  ulong               chunk,
+                  ulong               sz ) {
   if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_ERROR ) ) {
     /* skip all hash frags when in error state. */
     return;
   }
   if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING &&
                    ctx->state!=FD_SNAPSHOT_STATE_FINISHING ) ) {
-    if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_SNAPWM) ) FD_LOG_ERR(( "invalid state for data frag %u", ctx->state ));
+    if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_SNAPWM) ) {
+      FD_LOG_WARNING(( "received invalid data frag %s (%lu) from snapwm in state %s (%u)",
+                       fd_ssctrl_msg_ctrl_str( sig ), sig,
+                       fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
+      transition_malformed( ctx, stem );
+    }
     return;
   }
   switch( sig ) {
     case FD_SNAPSHOT_HASH_MSG_RESULT_ADD: {
-      FD_TEST( sz==sizeof(fd_lthash_value_t) );
+      FD_TEST( sz==sizeof(fd_ssctrl_hash_result_t) );
       FD_TEST( ctx->in_kind[ in_idx ]==IN_KIND_SNAPLH );
-      fd_lthash_value_t const * result = fd_chunk_to_laddr_const( ctx->adder_in[ in_idx-ctx->adder_in_offset ].wksp, chunk );
-      fd_lthash_add( &ctx->hash_accum.calculated_lthash, result );
+      fd_ssctrl_hash_result_t const * result = fd_chunk_to_laddr_const( ctx->adder_in[ in_idx-ctx->adder_in_offset ].wksp, chunk );
+      fd_lthash_add( &ctx->hash_accum.calculated_lthash, &result->lthash );
+      ctx->running_capitalization = fd_long_sat_add( ctx->running_capitalization, result->capitalization );
+      if( FD_UNLIKELY( ctx->running_capitalization==LONG_MAX ) ) {
+        FD_LOG_WARNING(( "capitalization overflow, running_capitalization=%ld, result_capitalization=%ld", ctx->running_capitalization, result->capitalization ));
+        transition_malformed( ctx, stem );
+        return;
+      }
       ctx->hash_accum.received_lthashes++;
       break;
     }
     case FD_SNAPSHOT_HASH_MSG_RESULT_SUB: {
-      FD_TEST( sz==sizeof(fd_lthash_value_t) );
+      FD_TEST( sz==sizeof(fd_ssctrl_hash_result_t) );
       FD_TEST( ctx->in_kind[ in_idx ]==IN_KIND_SNAPWM );
-      fd_lthash_value_t const * result = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
-      fd_lthash_sub( &ctx->hash_accum.calculated_lthash, result );
-      break;
-    }
-    case FD_SNAPSHOT_HASH_MSG_EXPECTED: {
-      FD_TEST( sz==sizeof(fd_lthash_value_t) );
-      FD_TEST( ctx->in_kind[ in_idx ]==IN_KIND_SNAPWM );
-      fd_lthash_value_t const * result = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
-      ctx->hash_accum.expected_lthash = *result;
+      fd_ssctrl_hash_result_t const * result = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
+      fd_lthash_sub( &ctx->hash_accum.calculated_lthash, &result->lthash );
+      FD_TEST( result->capitalization>=0L );
+      ctx->dup_capitalization = fd_long_sat_add( ctx->dup_capitalization, result->capitalization );
       break;
     }
     default: {
-      FD_LOG_ERR(( "unexpected hash sig %lu", sig ));
+      FD_LOG_ERR(( "unexpected hash frag %s (%lu) in state %s (%lu)",
+                   fd_ssctrl_msg_ctrl_str( sig ), sig,
+                   fd_ssctrl_state_str( (ulong)ctx->state ), (ulong)ctx->state ));
       break;
     }
   }
+}
+
+static inline void
+handle_expected_hash_and_capitalization_message( fd_snaplv_t *       ctx,
+                                                 fd_stem_context_t * stem,
+                                                 ulong               sig,
+                                                 ulong               chunk,
+                                                 ulong               sz ) {
+  if( FD_UNLIKELY( ctx->state==FD_SNAPSHOT_STATE_ERROR ) ) {
+    /* skip this message when in error state. */
+    return;
+  }
+
+  if( FD_UNLIKELY( ctx->state!=FD_SNAPSHOT_STATE_PROCESSING ) ) {
+    FD_LOG_WARNING(( "received invalid message %s (%lu) from snapwm in state %s (%u)",
+                     fd_ssctrl_msg_ctrl_str( sig ), sig,
+                     fd_ssctrl_state_str( (ulong)ctx->state ), ctx->state ));
+    transition_malformed( ctx, stem );
+    return;
+  }
+
+  if( FD_UNLIKELY( sz!=sizeof(fd_ssctrl_hash_result_t) ) ) {
+    FD_LOG_ERR(( "unexpected msg sz %lu for sig FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL", sz ));
+    return;
+  }
+
+  fd_ssctrl_hash_result_t const * expected = fd_chunk_to_laddr_const( ctx->in.wksp, chunk );
+  ctx->hash_accum.expected_lthash = expected->lthash;
+  ctx->manifest_capitalization    = expected->capitalization;
 }
 
 static inline int
@@ -458,11 +532,11 @@ returnable_frag( fd_snaplv_t *       ctx,
                  fd_stem_context_t * stem ) {
   FD_TEST( ctx->state!=FD_SNAPSHOT_STATE_SHUTDOWN );
 
-  if( FD_LIKELY( sig==FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH ) ) handle_data_frag( ctx, stem, sig, chunk, sz, tspub );
+  if( FD_LIKELY( sig==FD_SNAPSHOT_HASH_MSG_SUB_META_BATCH ) )       handle_data_frag( ctx, stem, sig, chunk, sz, tspub );
   else if( FD_LIKELY( sig==FD_SNAPSHOT_HASH_MSG_RESULT_ADD ||
-                      sig==FD_SNAPSHOT_HASH_MSG_RESULT_SUB ||
-                      sig==FD_SNAPSHOT_HASH_MSG_EXPECTED ) )  handle_hash_frag( ctx, in_idx, sig, chunk, sz );
-  else                                                        handle_control_frag( ctx, stem, sig, in_idx, tsorig, tspub );
+                      sig==FD_SNAPSHOT_HASH_MSG_RESULT_SUB ) )      handle_hash_frag( ctx, stem, in_idx, sig, chunk, sz );
+  else if( FD_LIKELY( sig==FD_SNAPSHOT_HASH_MSG_EXP_AND_CAPITAL ) ) handle_expected_hash_and_capitalization_message( ctx, stem, sig, chunk, sz );
+  else                                                              handle_control_frag( ctx, stem, sig, in_idx, tsorig, tspub );
 
   return 0;
 }
@@ -487,30 +561,55 @@ after_credit( fd_snaplv_t *        ctx,
 
     ctx->hash_accum.awaiting_results  = 0;
     ctx->hash_accum.received_lthashes = 0UL;
+    ctx->running_capitalization       = fd_long_sat_sub( ctx->running_capitalization, ctx->dup_capitalization );
+    if( FD_UNLIKELY( ctx->running_capitalization==LONG_MIN ) ) {
+      FD_LOG_WARNING(( "capitalization underflow, running_capitalization=%ld, dup_capitalization=%ld", ctx->running_capitalization, ctx->dup_capitalization ));
+      transition_malformed( ctx, stem );
+      return;
+    }
+    if( FD_UNLIKELY( ctx->running_capitalization<0L ) ) {
+      FD_LOG_WARNING(( "computed capitalization %ld is invalid", ctx->running_capitalization ));
+      transition_malformed( ctx, stem );
+      return;
+    }
+    long computed_capitalization = ctx->running_capitalization;
+    int capitalization_match     = computed_capitalization==ctx->manifest_capitalization;
 
-    int test = memcmp( &ctx->hash_accum.expected_lthash, &ctx->hash_accum.calculated_lthash, sizeof(fd_lthash_value_t) );
+    int lthash_match = !memcmp( &ctx->hash_accum.expected_lthash, &ctx->hash_accum.calculated_lthash, sizeof(fd_lthash_value_t) );
 
-    if( FD_UNLIKELY( test ) ) {
+    if( FD_UNLIKELY( !lthash_match ) ) {
       /* SnapshotError::MismatchedHash
          https://github.com/anza-xyz/agave/blob/v3.1.8/runtime/src/snapshot_bank_utils.rs#L479 */
-      FD_LOG_WARNING(( "calculated accounts lthash %s does not match accounts lthash %s in snapshot manifest",
+      FD_LOG_WARNING(( "calculated accounts lthash %s does not match accounts lthash %s in %s snapshot manifest",
                         FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.calculated_lthash ),
-                        FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.expected_lthash ) ));
+                        FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.expected_lthash ),
+                        ctx->full?"full":"incremental" ));
       transition_malformed( ctx, stem );
       return;
     } else {
-      FD_LOG_INFO(( "calculated accounts lthash %s matches accounts lthash %s in snapshot manifest",
+      FD_LOG_INFO(( "calculated accounts lthash %s matches accounts lthash %s in %s snapshot manifest",
                      FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.calculated_lthash ),
-                     FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.expected_lthash ) ));
-      fd_stem_publish( stem, ctx->out_link[ OUT_LINK_CT ].idx, ctx->hash_accum.ack_sig, 0UL, 0UL, 0UL, 0UL, 0UL );
+                     FD_LTHASH_ENC_32_ALLOCA( &ctx->hash_accum.expected_lthash ),
+                     ctx->full?"full":"incremental" ));
     }
+
+    if( FD_UNLIKELY( !capitalization_match ) ) {
+      /* SnapshotError::MismatchedCapitalization
+         https://github.com/anza-xyz/agave/blob/v4.0.0-beta.2/runtime/src/snapshot_bank_utils.rs#L217 */
+      FD_LOG_WARNING(( "%s snapshot manifest capitalization %ld does not match computed capitalization %ld",
+                       ctx->full?"full":"incremental", ctx->manifest_capitalization, computed_capitalization ));
+      transition_malformed( ctx, stem );
+      return;
+    }
+
+    fd_stem_publish( stem, ctx->out_link[ OUT_LINK_CT ].idx, ctx->hash_accum.ack_sig, 0UL, 0UL, 0UL, 0UL, 0UL );
   }
 
   if( FD_UNLIKELY( ctx->fail.wait && ctx->fail.ack_cnt==ctx->num_hash_tiles ) ) {
     fd_stem_publish( stem, ctx->out_link[ OUT_LINK_CT ].idx, ctx->fail.exp_sig, 0UL, 0UL, 0UL, 0UL, 0UL );
     ctx->fail.exp_sig = 0UL;
     ctx->fail.ack_cnt = 0UL;
-    ctx->fail.wait = 0;
+    ctx->fail.wait    = 0;
     return;
   }
 }
@@ -520,7 +619,7 @@ populate_allowed_fds( fd_topo_t      const * topo FD_PARAM_UNUSED,
                       fd_topo_tile_t const * tile FD_PARAM_UNUSED,
                       ulong                  out_fds_cnt,
                       int *                  out_fds ) {
-  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "out_fds_cnt %lu", out_fds_cnt ));
+  if( FD_UNLIKELY( out_fds_cnt<2UL ) ) FD_LOG_ERR(( "unexpected out_fds_cnt %lu", out_fds_cnt ));
 
   ulong out_cnt = 0;
   out_fds[ out_cnt++ ] = 2UL; /* stderr */
@@ -639,6 +738,11 @@ unprivileged_init( fd_topo_t *      topo,
 
   fd_lthash_zero( &ctx->hash_accum.calculated_lthash );
   fd_lthash_zero( &ctx->recovery.full_lthash );
+
+  ctx->recovery.capitalization = 0L;
+  ctx->running_capitalization  = 0L;
+  ctx->dup_capitalization      = 0L;
+  ctx->manifest_capitalization = 0L;
 
   ctx->fail.exp_sig = 0UL;
   ctx->fail.ack_cnt = 0UL;

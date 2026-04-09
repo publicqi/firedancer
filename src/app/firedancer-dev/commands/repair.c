@@ -124,6 +124,8 @@ repair_topo( config_t * config ) {
 
   fd_topob_wksp( topo, "repair_sign"  );
   fd_topob_wksp( topo, "sign_repair"  );
+  fd_topob_wksp( topo, "rnonce"       );
+  fd_topob_wksp( topo, "repair_out"  );
 
   fd_topob_wksp( topo, "txsend_out"   );
 
@@ -152,12 +154,11 @@ repair_topo( config_t * config ) {
 
   /**/                 fd_topob_link( topo, "repair_net",   "net_repair",   config->net.ingress_buffer_size,          FD_NET_MTU,                    1UL );
 
-  FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_out",    "shred_out",    pending_fec_shreds_depth,                 FD_SHRED_OUT_MTU,              2UL /* at most 2 msgs per after_frag */ );
-
-  FOR(shred_tile_cnt)  fd_topob_link( topo, "repair_shred", "shred_out",    pending_fec_shreds_depth,                 sizeof(fd_ed25519_sig_t),      1UL );
-
+  FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_out",    "shred_out",    pending_fec_shreds_depth,                 sizeof(fd_shred_message_t),    2UL /* at most 2 msgs per after_frag */ );
   FOR(sign_tile_cnt-1) fd_topob_link( topo, "repair_sign",  "repair_sign",  256UL,                                    FD_REPAIR_MAX_PREIMAGE_SZ,     1UL );
   FOR(sign_tile_cnt-1) fd_topob_link( topo, "sign_repair",  "sign_repair",  128UL,                                    sizeof(fd_ed25519_sig_t),      1UL );
+
+  /**/                 fd_topob_link( topo, "repair_out",   "repair_out",   128UL,                                    sizeof(fd_fec_complete_t),   1UL );
 
   /**/                 fd_topob_link( topo, "poh_shred",    "poh_shred",    16384UL,                                  USHORT_MAX,                    1UL );
 
@@ -174,7 +175,7 @@ repair_topo( config_t * config ) {
 
   /*                                              topo, tile_name, tile_wksp, metrics_wksp, cpu_idx,                       is_agave, uses_id_keyswitch, uses_av_keyswitch */
   FOR(shred_tile_cnt)              fd_topob_tile( topo, "shred",   "shred",   "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        1,                 0 );
-  fd_topo_tile_t * repair_tile =   fd_topob_tile( topo, "repair",  "repair",  "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        0,                 0 );
+  fd_topo_tile_t * repair_tile =   fd_topob_tile( topo, "repair",  "repair",  "metric_in",  tile_to_cpu[ topo->tile_cnt ], 0,        1,                 0 );
 
   /* Setup a shared wksp object for fec sets. */
 
@@ -237,7 +238,6 @@ repair_topo( config_t * config ) {
   FOR(shred_tile_cnt)  fd_topob_tile_out( topo, "shred",  i,                          "shred_out",     i                                                    );
   FOR(shred_tile_cnt)  fd_topob_tile_out( topo, "shred",  i,                          "shred_net",     i                                                    );
   FOR(shred_tile_cnt)  fd_topob_tile_in ( topo, "shred",  i,             "metric_in", "ipecho_out",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED );
-  FOR(shred_tile_cnt)  fd_topob_tile_in(  topo, "shred",  i,             "metric_in", "repair_shred",  i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
 
   /**/                 fd_topob_tile_out( topo, "repair",  0UL,                       "repair_net",    0UL                                                  );
 
@@ -259,12 +259,12 @@ repair_topo( config_t * config ) {
   /**/                 fd_topob_tile_in(  topo, "repair",  0UL,          "metric_in", "gossip_out",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
                        fd_topob_tile_in(  topo, "repair",  0UL,          "metric_in", "snapin_manif",  0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
   FOR(shred_tile_cnt)  fd_topob_tile_in(  topo, "repair",  0UL,          "metric_in", "shred_out",     i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
-  FOR(shred_tile_cnt)  fd_topob_tile_out( topo, "repair", 0UL,                        "repair_shred",  i                                                    );
   FOR(sign_tile_cnt-1) fd_topob_tile_out( topo, "repair", 0UL,                        "repair_sign",   i                                                    );
   FOR(sign_tile_cnt-1) fd_topob_tile_in ( topo, "sign",   i+1,           "metric_in", "repair_sign",   i,            FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
   FOR(sign_tile_cnt-1) fd_topob_tile_out( topo, "sign",   i+1,                        "sign_repair",   i                                                    );
   FOR(sign_tile_cnt-1) fd_topob_tile_in ( topo, "repair", 0UL,           "metric_in", "sign_repair",   i,            FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
 
+  /**/                 fd_topob_tile_out( topo, "repair", 0UL,                        "repair_out",   0UL                                                   );
   /**/                 fd_topob_tile_in ( topo, "gossip", 0UL,           "metric_in", "sign_gossip",   0UL,          FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
   /**/                 fd_topob_tile_in ( topo, "ipecho", 0UL,           "metric_in", "genesi_out",    0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
   /**/                 fd_topob_tile_in ( topo, "repair", 0UL,           "metric_in", "tower_out",     0UL,          FD_TOPOB_RELIABLE,   FD_TOPOB_POLLED   );
@@ -288,12 +288,27 @@ repair_topo( config_t * config ) {
     fd_topob_tile_out( topo, "scap", 0UL, "snapin_manif", 0UL );
   }
 
+  /* Repair and shred share a secret they use to generate the nonces.
+    It's not super security sensitive, but for good hygiene, we make it
+    an object. */
+  if( 1 /* just restrict the scope for these variables in this big function */ ) {
+    fd_topo_obj_t * rnonce_ss_obj = fd_topob_obj( topo, "rnonce_ss", "rnonce" );
+    fd_topo_tile_t * repair_tile = &topo->tiles[ fd_topo_find_tile( topo, "repair", 0UL ) ];
+    fd_topob_tile_uses( topo, repair_tile, rnonce_ss_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
+    for( ulong i=0UL; i<shred_tile_cnt; i++ ) {
+      fd_topo_tile_t * shred_tile = &topo->tiles[ fd_topo_find_tile( topo, "shred", i ) ];
+      fd_topob_tile_uses( topo, shred_tile, rnonce_ss_obj, FD_SHMEM_JOIN_MODE_READ_ONLY );
+    }
+    FD_TEST( fd_pod_insertf_ulong( topo->props, rnonce_ss_obj->id, "rnonce_ss" ) );
+  }
+
   FD_TEST( fd_link_permit_no_producers( topo, "quic_net"     ) == quic_tile_cnt );
   FD_TEST( fd_link_permit_no_producers( topo, "poh_shred"    ) == 1UL           );
   FD_TEST( fd_link_permit_no_producers( topo, "txsend_out"   ) == 1UL           );
   FD_TEST( fd_link_permit_no_producers( topo, "genesi_out"   ) == 1UL           );
   FD_TEST( fd_link_permit_no_producers( topo, "tower_out"    ) == 1UL           );
   FD_TEST( fd_link_permit_no_consumers( topo, "net_quic"     ) == net_tile_cnt  );
+  FD_TEST( fd_link_permit_no_consumers( topo, "repair_out"   ) == 1UL           );
 
   config->tiles.txsend.txsend_src_port = 0; /* disable txsend */
 
@@ -310,8 +325,6 @@ repair_topo( config_t * config ) {
 
   config->topo = *topo;
 }
-
-extern int * fd_log_private_shared_lock;
 
 static char *
 fmt_count( char buf[ static 64 ], ulong count ) {
@@ -424,27 +437,27 @@ print_catchup_slots( fd_wksp_t * repair_tile_wksp, ctx_t * repair_ctx, int verbo
 }
 
 static fd_location_info_t * location_table;
-static fd_pubkey_t peers_copy[ FD_ACTIVE_KEY_MAX ];
+static fd_pubkey_t peers_copy[ FD_REPAIR_PEER_MAX];
 
 static ulong
-sort_peers_by_latency( fd_policy_peer_t * active_table, fd_peer_dlist_t * peers_dlist, fd_peer_dlist_t * peers_wlist, fd_peer_t * peers_arr ) {
+sort_peers_by_latency( fd_policy_peer_map_t * active_table, fd_policy_peer_dlist_t * peers_dlist, fd_policy_peer_dlist_t * peers_wlist, fd_policy_peer_t * peers_arr ) {
   ulong i = 0;
-  fd_peer_dlist_iter_t iter = fd_peer_dlist_iter_fwd_init( peers_dlist, peers_arr );
-  while( !fd_peer_dlist_iter_done( iter, peers_dlist, peers_arr ) ) {
-    fd_peer_t * peer = fd_peer_dlist_iter_ele( iter, peers_dlist, peers_arr );
+  fd_policy_peer_dlist_iter_t iter = fd_policy_peer_dlist_iter_fwd_init( peers_dlist, peers_arr );
+  while( !fd_policy_peer_dlist_iter_done( iter, peers_dlist, peers_arr ) ) {
+    fd_policy_peer_t * peer = fd_policy_peer_dlist_iter_ele( iter, peers_dlist, peers_arr );
     if( FD_UNLIKELY( !peer ) ) break;
-    peers_copy[ i++ ] = peer->identity;
-    if( FD_UNLIKELY( i >= FD_ACTIVE_KEY_MAX ) ) break;
-    iter = fd_peer_dlist_iter_fwd_next( iter, peers_dlist, peers_arr );
+    peers_copy[ i++ ] = peer->key;
+    if( FD_UNLIKELY( i >= FD_REPAIR_PEER_MAX ) ) break;
+    iter = fd_policy_peer_dlist_iter_fwd_next( iter, peers_dlist, peers_arr );
   }
   ulong fast_cnt = i;
-  iter = fd_peer_dlist_iter_fwd_init( peers_wlist, peers_arr );
-  while( !fd_peer_dlist_iter_done( iter, peers_wlist, peers_arr ) ) {
-    fd_peer_t * peer = fd_peer_dlist_iter_ele( iter, peers_wlist, peers_arr );
+  iter = fd_policy_peer_dlist_iter_fwd_init( peers_wlist, peers_arr );
+  while( !fd_policy_peer_dlist_iter_done( iter, peers_wlist, peers_arr ) ) {
+    fd_policy_peer_t * peer = fd_policy_peer_dlist_iter_ele( iter, peers_wlist, peers_arr );
     if( FD_UNLIKELY( !peer ) ) break;
-    peers_copy[ i++ ] = peer->identity;
-    if( FD_UNLIKELY( i >= FD_ACTIVE_KEY_MAX ) ) break;
-    iter = fd_peer_dlist_iter_fwd_next( iter, peers_wlist, peers_arr );
+    peers_copy[ i++ ] = peer->key;
+    if( FD_UNLIKELY( i >= FD_REPAIR_PEER_MAX ) ) break;
+    iter = fd_policy_peer_dlist_iter_fwd_next( iter, peers_wlist, peers_arr );
   }
   FD_LOG_NOTICE(( "Fast peers cnt: %lu. Slow peers cnt: %lu.", fast_cnt, i - fast_cnt ));
 
@@ -452,8 +465,8 @@ sort_peers_by_latency( fd_policy_peer_t * active_table, fd_peer_dlist_t * peers_
   for( uint i = 0; i < peer_cnt - 1; i++ ) {
     int swapped = 0;
     for( uint j = 0; j < peer_cnt - 1 - i; j++ ) {
-      fd_policy_peer_t const * active_j  = fd_policy_peer_map_query( active_table, peers_copy[ j ], NULL );
-      fd_policy_peer_t const * active_j1 = fd_policy_peer_map_query( active_table, peers_copy[ j + 1 ], NULL );
+      fd_policy_peer_t const * active_j  = fd_policy_peer_map_ele_query( active_table, &peers_copy[ j ], NULL, peers_arr );
+      fd_policy_peer_t const * active_j1 = fd_policy_peer_map_ele_query( active_table, &peers_copy[ j + 1 ], NULL, peers_arr );
 
       /* Skip peers with no responses */
       double latency_j  = 10e9;
@@ -482,16 +495,16 @@ print_peer_location_latency( fd_wksp_t * repair_tile_wksp, ctx_t * tile_ctx ) {
   ulong              peerarr_gaddr = fd_wksp_gaddr_fast( tile_ctx->wksp, policy->peers.pool );
   ulong              peerlst_gaddr = fd_wksp_gaddr_fast( tile_ctx->wksp, policy->peers.fast );
   ulong              peerwst_gaddr = fd_wksp_gaddr_fast( tile_ctx->wksp, policy->peers.slow );
-  fd_policy_peer_t * peers_map     = (fd_policy_peer_t *)fd_wksp_laddr( repair_tile_wksp, peermap_gaddr );
-  fd_peer_dlist_t *  peers_dlist   = (fd_peer_dlist_t *) fd_wksp_laddr( repair_tile_wksp, peerlst_gaddr );
-  fd_peer_dlist_t *  peers_wlist   = (fd_peer_dlist_t *) fd_wksp_laddr( repair_tile_wksp, peerwst_gaddr );
-  fd_peer_t *        peers_arr     = (fd_peer_t *)       fd_wksp_laddr( repair_tile_wksp, peerarr_gaddr );
+  fd_policy_peer_map_t *   peers_map   = (fd_policy_peer_map_t *)  fd_wksp_laddr( repair_tile_wksp, peermap_gaddr );
+  fd_policy_peer_dlist_t * peers_dlist = (fd_policy_peer_dlist_t *)fd_wksp_laddr( repair_tile_wksp, peerlst_gaddr );
+  fd_policy_peer_dlist_t * peers_wlist = (fd_policy_peer_dlist_t *)fd_wksp_laddr( repair_tile_wksp, peerwst_gaddr );
+  fd_policy_peer_t *       peers_arr   = (fd_policy_peer_t *)      fd_wksp_laddr( repair_tile_wksp, peerarr_gaddr );
 
   ulong peer_cnt = sort_peers_by_latency( peers_map, peers_dlist, peers_wlist, peers_arr );
   printf("\nPeer Location/Latency Information\n");
   printf( "| %-46s | %-7s | %-8s | %-8s | %-7s | %12s | %s\n", "Pubkey", "Req Cnt", "Req B/s", "Rx B/s", "Rx Rate", "Avg Latency", "Location Info" );
   for( uint i = 0; i < peer_cnt; i++ ) {
-    fd_policy_peer_t const * active = fd_policy_peer_map_query( peers_map, peers_copy[ i ], NULL );
+    fd_policy_peer_t const * active = fd_policy_peer_map_ele_query( peers_map, &peers_copy[ i ], NULL, peers_arr );
     if( FD_LIKELY( active && active->res_cnt > 0 ) ) {
       fd_location_info_t * info = fd_location_table_query( location_table, active->ip4, NULL );
       char * geolocation = info ? info->location : "Unknown";
@@ -655,9 +668,6 @@ repair_cmd_fn_catchup( args_t *   args,
       tile->shredcap.enable_publish_stake_weights = 1;
       fd_cstr_ncpy( tile->shredcap.manifest_path, args->repair.manifest_path, PATH_MAX );
     }
-    if( FD_UNLIKELY( !strcmp( tile->name, "repair" ) ) ) {
-      tile->repair.end_slot = args->repair.end_slot;
-    }
   }
 
   fd_topo_print_log( 1, &config->topo );
@@ -674,7 +684,6 @@ repair_cmd_fn_catchup( args_t *   args,
   }
   run_firedancer_init( config, 1, 0 );
 
-  fd_log_private_shared_lock[ 1 ] = 0;
   fd_topo_join_workspaces( &config->topo, FD_SHMEM_JOIN_MODE_READ_WRITE, FD_TOPO_CORE_DUMP_LEVEL_DISABLED );
 
   fd_topo_fill( &config->topo );
@@ -737,12 +746,11 @@ repair_cmd_fn_catchup( args_t *   args,
   FD_TEST( shred_out_link_idx!=ULONG_MAX );
   fd_topo_link_t * shred_out_link   = &config->topo.links[ shred_out_link_idx  ];
   fd_frag_meta_t * shred_out_mcache = shred_out_link->mcache;
+  void * shred_out_dcache = config->topo.workspaces[ config->topo.objs[ shred_out_link->dcache_obj_id ].wksp_id ].wksp;
 
   ulong turbine_slot0 = 0;
   long  last_print    = fd_log_wallclock();
   ulong last_sent     = 0UL;
-
-  if( FD_LIKELY( args->repair.end_slot ) ) turbine_slot0 = args->repair.end_slot;
 
   fd_topo_run_single_process( &config->topo, 0, config->uid, config->gid, fdctl_tile_run );
   for(;;) {
@@ -750,7 +758,9 @@ repair_cmd_fn_catchup( args_t *   args,
     if( FD_UNLIKELY( !turbine_slot0 ) ) {
       fd_frag_meta_t * frag = &shred_out_mcache[0]; /* hack to get first frag */
       if ( frag->sz > 0 ) {
-        turbine_slot0 = fd_disco_shred_out_shred_sig_slot( frag->sig );
+        uchar      * shred_out_chunk = fd_chunk_to_laddr( shred_out_dcache, frag->chunk );
+        fd_shred_base_t * shred_out_shred = (fd_shred_base_t *)fd_type_pun( shred_out_chunk );
+        turbine_slot0 = shred_out_shred->shred.slot;
         FD_LOG_NOTICE(("turbine_slot0: %lu", turbine_slot0));
       }
     }
@@ -763,7 +773,7 @@ repair_cmd_fn_catchup( args_t *   args,
       print_tile_metrics( shred_metrics, repair_metrics, repair_metrics_prev, repair_net_links, net_shred_links, net_cnt, &last_sent, last_print, now );
       ulong slots_behind = turbine_slot0 > repair_metrics[ MIDX( COUNTER, REPAIR, REPAIRED_SLOTS ) ] ? turbine_slot0 - repair_metrics[ MIDX( COUNTER, REPAIR, REPAIRED_SLOTS ) ] : 0;
       printf(" Repaired slots: %lu/%lu  (slots behind: %lu)\n", repair_metrics[ MIDX( COUNTER, REPAIR, REPAIRED_SLOTS ) ], turbine_slot0, slots_behind );
-      if( turbine_slot0 && !slots_behind && ( !args->repair.end_slot || FD_VOLATILE_CONST( repair_ctx->profiler.complete ) ) ) {
+      if( turbine_slot0 && !slots_behind ) {
         catchup_finished = 1;
       }
       printf("\n");
@@ -798,9 +808,6 @@ repair_cmd_fn_eqvoc( args_t *   args,
       tile->shredcap.enable_publish_stake_weights = 1;
       fd_cstr_ncpy( tile->shredcap.manifest_path, args->repair.manifest_path, PATH_MAX );
     }
-    if( FD_UNLIKELY( !strcmp( tile->name, "repair" ) ) ) {
-      tile->repair.end_slot = args->repair.end_slot;
-    }
   }
 
   FD_LOG_NOTICE(( "Repair eqvoc testing init" ));
@@ -812,7 +819,6 @@ repair_cmd_fn_eqvoc( args_t *   args,
   if( 0==strcmp( config->net.provider, "xdp" ) ) fd_topo_install_xdp_simple( &config->topo, config->net.bind_address_parsed );
 
   run_firedancer_init( config, 1, 0 );
-  fd_log_private_shared_lock[ 1 ] = 0;
   fd_topo_join_workspaces( &config->topo, FD_SHMEM_JOIN_MODE_READ_WRITE, FD_TOPO_CORE_DUMP_LEVEL_DISABLED );
   fd_topo_fill( &config->topo );
   ulong repair_tile_idx = fd_topo_find_tile( &config->topo, "repair", 0UL );
@@ -855,7 +861,6 @@ repair_cmd_fn_metrics( args_t *   args,
                        config_t * config ) {
   //memset( &config->topo, 0, sizeof(config->topo) );
 
-  fd_log_private_shared_lock[ 1 ] = 0;
   fd_topo_join_workspaces( &config->topo, FD_SHMEM_JOIN_MODE_READ_ONLY, FD_TOPO_CORE_DUMP_LEVEL_DISABLED );
   fd_topo_fill( &config->topo );
 
@@ -1083,53 +1088,31 @@ repair_cmd_fn_peers( args_t *   args,
 
   fd_policy_t * policy = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, repair_ctx->policy ) );
 
-  fd_peer_dlist_t *  best_dlist  = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.fast ) );
-  fd_peer_dlist_t *  worst_dlist = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.slow ) );
-  fd_peer_t *        pool        = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.pool ) );
-  fd_policy_peer_t * peers_map   = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.map ) );
-
+  fd_policy_peer_dlist_t *  best_dlist  = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.fast ) );
+  fd_policy_peer_dlist_t *  worst_dlist = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.slow ) );
+  fd_policy_peer_t *        pool        = fd_wksp_laddr( repair_wksp->wksp, fd_wksp_gaddr_fast( repair_ctx->wksp, policy->peers.pool ) );
 
   printf("FAST REPAIR PEERS (latency < 80ms)\n");
   int i = 1;
-  for( fd_peer_dlist_iter_t iter = fd_peer_dlist_iter_fwd_init( best_dlist, pool );
-        !fd_peer_dlist_iter_done( iter, best_dlist, pool );
-        iter = fd_peer_dlist_iter_fwd_next( iter, best_dlist, pool ) ) {
-      fd_peer_t * peer = fd_peer_dlist_iter_ele( iter, best_dlist, pool );
-      FD_BASE58_ENCODE_32_BYTES( peer->identity.key, p );
+  for( fd_policy_peer_dlist_iter_t iter = fd_policy_peer_dlist_iter_fwd_init( best_dlist, pool );
+        !fd_policy_peer_dlist_iter_done( iter, best_dlist, pool );
+        iter = fd_policy_peer_dlist_iter_fwd_next( iter, best_dlist, pool ) ) {
+      fd_policy_peer_t * peer = fd_policy_peer_dlist_iter_ele( iter, best_dlist, pool );
+      FD_BASE58_ENCODE_32_BYTES( peer->key.key, p );
       printf(" %d. %s\n", i, p );
       i++;
   }
 
   printf("SLOW REPAIR PEERS (latency > 80ms)\n");
   i = 1;
-  for( fd_peer_dlist_iter_t iter = fd_peer_dlist_iter_fwd_init( worst_dlist, pool );
-        !fd_peer_dlist_iter_done( iter, worst_dlist, pool );
-        iter = fd_peer_dlist_iter_fwd_next( iter, worst_dlist, pool ) ) {
-      fd_peer_t * peer = fd_peer_dlist_iter_ele( iter, worst_dlist, pool );
-      FD_BASE58_ENCODE_32_BYTES( peer->identity.key, p );
+  for( fd_policy_peer_dlist_iter_t iter = fd_policy_peer_dlist_iter_fwd_init( worst_dlist, pool );
+        !fd_policy_peer_dlist_iter_done( iter, worst_dlist, pool );
+        iter = fd_policy_peer_dlist_iter_fwd_next( iter, worst_dlist, pool ) ) {
+      fd_policy_peer_t * peer = fd_policy_peer_dlist_iter_ele( iter, worst_dlist, pool );
+      FD_BASE58_ENCODE_32_BYTES( peer->key.key, p );
       printf(" %d. %s\n", i, p);
       i++;
   }
-
-  for ( ulong i = 0; i < fd_policy_peer_map_slot_cnt( peers_map ); i++ ) {
-    fd_policy_peer_t * peer = &peers_map[ i ];
-    FD_TEST( fd_peer_pool_idx_test( pool, peer->pool_idx ) );
-  }
-
-  /* Specific peer info
-  fd_hash_t key = { .ul = {15638155844970609479UL, 7058397130238410853UL,
-    953861879773611379UL, 1223280701789465918UL } };
-  fd_policy_peer_t * peer = fd_policy_peer_map_query( peers_map, key, NULL );
-  if( FD_LIKELY( peer ) ) {
-    printf("Peer info:\n");
-    FD_BASE58_ENCODE_32_BYTES( peer->key.key, key_b58 );
-    printf("  Key: %s\n", key_b58 );
-    printf("  Req Cnt: %lu\n", peer->req_cnt );
-    printf("  Res Cnt: %lu\n", peer->res_cnt );
-    printf("  First Req Ts: %ld\n", peer->first_req_ts );
-    printf("  Last Req Ts: %ld\n",  peer->last_req_ts );
-    printf("  Pool Index: %lu\n",   peer->pool_idx );
-  } */
 }
 
 
@@ -1161,7 +1144,6 @@ static const char * CATCHUP_HELP =
   "\n"
   "optional arguments:\n"
   "  -h, --help            show this help message and exit\n"
-  "  --end-slot END_SLOT   slot to catchup to (generally should be a rooted slot)\n"
   "  --iptable-path IPTABLE_PATH\n"
   "                        path to iptable file\n"
   "  --sort-by-slot        sort results by slot\n";
@@ -1260,7 +1242,6 @@ repair_cmd_args( int *    pargc,
   char const * iptable_path  = fd_env_strip_cmdline_cstr    ( pargc, pargv, "--iptable",       NULL, NULL      );
   ulong        slot          = fd_env_strip_cmdline_ulong   ( pargc, pargv, "--slot",          NULL, ULONG_MAX );
   int          sort_by_slot  = fd_env_strip_cmdline_contains( pargc, pargv, "--sort-by-slot"                   );
-  ulong        end_slot      = fd_env_strip_cmdline_ulong   ( pargc, pargv, "--end-slot",      NULL, 0         );
 
   if( FD_UNLIKELY( !strcmp( args->repair.pos_arg, "catchup" ) && !manifest_path ) ) {
     args->repair.help = 1;
@@ -1273,7 +1254,6 @@ repair_cmd_args( int *    pargc,
   fd_cstr_fini( fd_cstr_append_cstr_safe( fd_cstr_init( args->repair.iptable_path ),  iptable_path,  sizeof(args->repair.iptable_path )-1UL ) );
   args->repair.slot         = slot;
   args->repair.sort_by_slot = sort_by_slot;
-  args->repair.end_slot     = end_slot;
 }
 
 static void

@@ -20,10 +20,6 @@ setup_topo_banks( fd_topo_t *  topo,
                   ulong        max_fork_width,
                   int          larger_max_cost_per_block );
 
-fd_topo_obj_t *
-setup_topo_banks_locks( fd_topo_t *  topo,
-                        char const * wksp_name );
-
 void
 setup_topo_funk( fd_topo_t *  topo,
                  ulong        max_account_records,
@@ -41,7 +37,8 @@ fd_topo_obj_t *
 setup_topo_store( fd_topo_t *  topo,
                   char const * wksp_name,
                   ulong        fec_max,
-                  uint         part_cnt );
+                  uint         part_cnt,
+                  ulong        fec_data_max );
 
 fd_topo_obj_t *
 setup_topo_acc_pool( fd_topo_t * topo,

@@ -112,6 +112,9 @@ struct fd_snapshot_manifest_vote_stakes {
   /* The commission account for block revenue (identity, before SIMD-0232) */
   uchar commission_block[ 32UL ];
 
+  /* Whether this vote account has a BLS pubkey set */
+  uchar has_identity_bls;
+
   /* The validator BLS pubkey (used after SIMD-0326: Alpenglow) */
   uchar identity_bls[ 48UL ];
 
@@ -139,7 +142,7 @@ struct fd_snapshot_manifest_vote_stakes {
 
 typedef struct fd_snapshot_manifest_vote_stakes fd_snapshot_manifest_vote_stakes_t;
 
-#define FD_SNAPSHOT_MANIFEST_EPOCH_STAKES_LEN 2UL
+#define FD_SNAPSHOT_MANIFEST_EPOCH_STAKES_LEN 3UL
 
 struct fd_snapshot_manifest_epoch_stakes {
    /* The epoch for which these vote accounts and stakes are valid for */
@@ -147,9 +150,10 @@ struct fd_snapshot_manifest_epoch_stakes {
   /* The total amount of active stake at the end of the given epoch.*/
   ulong                              total_stake;
 
-  /* The vote accounts and their stakes for a given epoch. */
+  /* The vote accounts and their stakes for a given epoch.
+     FIXME: Snapshot manifest has to support a much larger bound. */
   ulong                              vote_stakes_len;
-  fd_snapshot_manifest_vote_stakes_t vote_stakes[ FD_RUNTIME_MAX_VOTE_ACCOUNTS ];
+  fd_snapshot_manifest_vote_stakes_t vote_stakes[ 40200UL ];
 };
 
 typedef struct fd_snapshot_manifest_epoch_stakes fd_snapshot_manifest_epoch_stakes_t;
@@ -266,8 +270,9 @@ typedef struct fd_snapshot_manifest_blockhash fd_snapshot_manifest_blockhash_t;
 
 struct fd_snapshot_manifest {
   /* The UNIX timestamp when the genesis block was for this chain
-     was created, in nanoseconds.  */
-  ulong creation_time_millis;
+     was created, in seconds.
+     https://github.com/anza-xyz/agave/blob/v4.0.0-beta.1/runtime/src/bank.rs#L2108-L2114 */
+  ulong creation_time_seconds;
 
   /* At genesis, certain parameters can be set which control the
      inflation rewards going forward.  This includes what the initial
@@ -300,13 +305,6 @@ struct fd_snapshot_manifest {
 
   /* The slot number for this snapshot */
   ulong slot;
-
-  /* The epoch for this slot.  Epochs are a time period measured by a
-     fixed number of slots (432,000 slots).  At the epoch boundary,
-     where one epoch ends and another begins, validators
-     activate/deactivate stake, distribute rewards and calculate the
-     next leader schedule rotation. */
-  ulong epoch;
 
   /* The number of blocks that have been built since genesis.  This is
      kind of like the slot number, in that it increments by 1 for every
@@ -378,14 +376,9 @@ struct fd_snapshot_manifest {
   /* The fork_id in the status cache for the root slot. */
   ushort txncache_fork_id;
 
-  /* A list of ancestor slots. The bound comes from
-     https://github.com/anza-xyz/agave/blob/v3.0.6/accounts-db/src/ancestors.rs#L24
-     However in extreme conditons, the bound may be exceeded because
-     the ancestors data structure in agave contains an unbounded excess
-     field.  If the bound is exceeded, the snapshot is considered
-     malformed. */
-  ulong ancestors_len;
-  ulong ancestors[ 8192UL ];
+  /* A list of ancestor slots has been deprecated.  Agave's bank now
+     creates an ancestor set with a single entry (the current slot):
+     https://github.com/anza-xyz/agave/blob/v4.0.0-beta.1/runtime/src/bank.rs#L1846 */
 
   /* A hard fork is a deliberate deviation from the canonical blockchain
      progression.  This contains the list of slots which have
@@ -465,16 +458,18 @@ struct fd_snapshot_manifest {
      epoch in the slots immediately after the epoch boundary.  These
      vote and stake rewards are calculated as a stake-weighted
      percentage of the inflation rewards for the epoch and validator
-     uptime, which is measured by vote account vote credits. */
+     uptime, which is measured by vote account vote credits.
+     FIXME: Make this unbounded or support a much larger bound. */
   ulong                               vote_accounts_len;
-  fd_snapshot_manifest_vote_account_t vote_accounts[ FD_RUNTIME_MAX_VOTE_ACCOUNTS ];
+  fd_snapshot_manifest_vote_account_t vote_accounts[ 40200UL ];
 
+  /* FIXME: Make this unbounded or support a much larger bound. */
   ulong stake_delegations_len;
-  fd_snapshot_manifest_stake_delegation_t stake_delegations[ FD_RUNTIME_MAX_STAKE_ACCOUNTS ];
+  fd_snapshot_manifest_stake_delegation_t stake_delegations[ 3000000UL ];
 
   /* Epoch stakes represent the exact amount staked to each vote
-     account at the beginning of the previous epoch. They are
-     primarily used to derive the leader schedule.
+     account at the beginning of a previous epoch.  They are primarily
+     used to derive the leader schedule.
 
      Let's say the manifest is at epoch E.
 
@@ -484,17 +479,23 @@ struct fd_snapshot_manifest {
 
      where <epoch> assumes these values:
 
+       E-1 - represents the stakes at the beginning of epoch E-2,
+             used to compute the leader schedule at E-1.  Also used
+             by delay_commission_updates (SIMD-0249) to determine
+             the commission rate for partitioned epoch rewards
+             recalculation at boot.
+
        E   - represents the stakes at the beginning of epoch E-1,
              used to compute the leader schedule at E.
 
        E+1 - represents the stakes at the beginning of epoch E,
              used to compute the leader schedule at E+1.
 
-     The epoch stakes are stored in an array, where epoch_stakes[0]
-     contains the data to generate the current leader schedule (i.e. E)
-     and epoch_stakes[1] contains the data to generate the next leader
-     schedule (i.e. E+1). */
-  fd_snapshot_manifest_epoch_stakes_t epoch_stakes[ 2UL ];
+     The epoch stakes are stored in an array:
+       epoch_stakes[0] = epoch E-1
+       epoch_stakes[1] = epoch E
+       epoch_stakes[2] = epoch E+1 */
+  fd_snapshot_manifest_epoch_stakes_t epoch_stakes[ 3UL ];
 };
 
 typedef struct fd_snapshot_manifest fd_snapshot_manifest_t;

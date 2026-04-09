@@ -658,7 +658,7 @@ fd_quic_conn_free_validate( fd_quic_t * quic ) {
   ulong cnt  = 0UL;
   uint  node = state->free_conn_list;
   while( node!=UINT_MAX ) {
-    FD_TEST( node <= quic->limits.conn_cnt );
+    FD_TEST( node < quic->limits.conn_cnt );
     fd_quic_conn_t * conn = fd_quic_conn_at_idx( state, node );
     FD_TEST( conn->state == FD_QUIC_CONN_STATE_INVALID );
     conn->visited = 1U;
@@ -4472,6 +4472,16 @@ fd_quic_pkt_meta_retry( fd_quic_t      *  quic,
 
             /* do not try sending data that has been acked */
             ulong offset = fd_ulong_max( pkt_meta->val.range.offset_lo, stream->unacked_low );
+
+            /* This pkt_meta may be stale: when ACK-driven loss detection
+               force-retries an earlier pkt_meta for the same stream, the
+               retransmitted data can be ACKed (advancing unacked_low)
+               before this pkt_meta expires. Skip the retry if the
+               stream has nothing left to send. */
+            if( FD_UNLIKELY( offset>=stream->tx_buf.head &&
+                  !( stream->state & FD_QUIC_STREAM_STATE_TX_FIN ) ) ) {
+              break;
+            }
 
             /* any data left to retry? */
             stream->tx_sent = fd_ulong_min( stream->tx_sent, offset );

@@ -12,12 +12,6 @@ typedef struct fd_bank fd_bank_t;
 struct fd_banks;
 typedef struct fd_banks fd_banks_t;
 
-struct fd_bank_data;
-typedef struct fd_bank_data fd_bank_data_t;
-
-struct fd_banks_locks;
-typedef struct fd_banks_locks fd_banks_locks_t;
-
 struct fd_exec_instr_ctx;
 typedef struct fd_exec_instr_ctx fd_exec_instr_ctx_t;
 
@@ -68,6 +62,26 @@ typedef struct fd_genesis fd_genesis_t;
 
 struct fd_stake_rewards;
 typedef struct fd_stake_rewards fd_stake_rewards_t;
+
+struct fd_top_votes;
+typedef struct fd_top_votes fd_top_votes_t;
+
+#define FD_EPOCH_CREDITS_MAX (64UL)
+struct fd_epoch_credits {
+  uchar  pubkey[32];
+  ulong  cnt;
+  ulong  base_credits;
+  ushort epoch             [ FD_EPOCH_CREDITS_MAX ];
+  uint   credits_delta     [ FD_EPOCH_CREDITS_MAX ];
+  uint   prev_credits_delta[ FD_EPOCH_CREDITS_MAX ];
+};
+typedef struct fd_epoch_credits fd_epoch_credits_t;
+
+struct fd_stashed_commission {
+  uchar pubkey[32];
+  uchar commission;
+};
+typedef struct fd_stashed_commission fd_stashed_commission_t;
 
 struct fd_account_meta {
   uchar owner[32];
